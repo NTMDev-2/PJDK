@@ -40,7 +40,6 @@ public class Main{
 # Coming soon
 These will be featured in next releases:
 - Strings
-- A simple print statement
 - For loops
 - Better error handling 
 
