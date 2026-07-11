@@ -836,6 +836,8 @@ def parseTokenAsType(token: str, acceptVoid: bool = False, isUnsigned: bool = Fa
             return Float
         case 'DOUBLE_TYPE' | 'double' | 'DOUBLE_LITERAL':
             return Double
+        case 'STRING_TYPE' | 'String' | 'STRING_LITERAL':
+            return String
         case _:
             try:
                 _a = ClassReference(token)
@@ -866,7 +868,7 @@ def toRPN(tokens: TokenSlice) -> TokenSlice:
     for i, tok in enumerate(tokens):
         t = tok.get()['type']
         if t in ('RESOLVED_VALUE', 'INT_LITERAL', 'LONG_LITERAL', 'BYTE_LITERAL',
-                 'SHORT_LITERAL', 'FLOAT_LITERAL', 'DOUBLE_LITERAL',
+                 'SHORT_LITERAL', 'FLOAT_LITERAL', 'DOUBLE_LITERAL', 'STRING_LITERAL',
                  'IDENTIFIER', 'TRUE', 'FALSE'):
             output.append(tok)
             continue
@@ -1142,6 +1144,8 @@ def resolveOperand(me: StackFrame | None, methodArgs: list | None, tok: Token | 
         if me is None or methodArgs is None:
             return val
         return resolveValue(me, methodArgs, tok)
+    if t == 'STRING_LITERAL':
+        return String(val)
     raise SyntaxError(f"Cannot resolve operand: {t} (value: '{val}')")
 def convertValue(value: object, target_type: object) -> object:
     if isinstance(value, target_type):
@@ -1156,7 +1160,13 @@ def convertValue(value: object, target_type: object) -> object:
     
     if isinstance(target_type, ClassType) and isinstance(value, ObjectReference):
         return value
-
+    if target_type is String or target_type == String:
+        if isinstance(value, (Numeric, Bool, Char)):
+            return String(str(value.get()))
+        elif isinstance(value, ObjectReference):
+            return String(str(value))
+        else:
+            return String(str(value))
     raise TypeError(f"Cannot convert {type(value).__name__} to {target_type.__name__}")
 class Expression:
     @staticmethod
@@ -1168,7 +1178,7 @@ class Expression:
         for tok in toRPN(tokens):
             t = tok.get()['type']
             val = tok.get()['val']
-
+            
             if t == 'LONG_LITERAL':
                 assumeType = 'long'
             elif t == 'BYTE_LITERAL':
@@ -1199,7 +1209,12 @@ class Expression:
             if t in EvalTokens.PRECEDENCE:
                 b = stack.pop()
                 a = stack.pop()
-                result = BIN_OPS[t](a.get(), b.get())
+                if isinstance(a, String) or isinstance(b, String): # Concatenation
+                    stack.append(String(str(a.get()) + str(b.get())))
+                    continue
+                else:
+                    result = BIN_OPS[t](a.get(), b.get())
+                
                 if t in ARITHMETIC_OPS:
                     result_type = promote(a, b)
                     result = result_type(result)
@@ -2078,8 +2093,8 @@ def invokeMethod(className: str, methodName: str, args: list, caller: str, thisR
     m.execute()
     return popFrame().returnValue
 
-
-content = (Path(__file__).parent / (input('Enter file name: ') + '.txt')).read_text(encoding="utf-8")
+#(input('Enter file name: ') + '.txt'
+content = (Path(__file__).parent / 'TestPyOOP.txt').read_text(encoding="utf-8")
 Exec = Execution(Intepreter(content)) 
 Exec.executeTokens()
 invokeMethod(ENTRY['entryClass'], ENTRY_METHOD_NAME, [], caller=ENTRY['entryClass'])
