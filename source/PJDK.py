@@ -119,6 +119,8 @@ class ClassType(Returnable):
     def __repr__(self):
         return f"ClassType({self.className})"
 
+
+
 def isAllowedAtThisScope(modifier: str, thisScope: str) -> bool: 
     isValidModifier(modifier)
     if thisScope == "this":
@@ -212,27 +214,28 @@ def argsList(args: dict[str, object]) -> dict: # This sets and compiles an argum
         if issubclass(type(expectedType), Numeric) or isinstance(expectedType, (Void, String)):
             continue
     return args
+
+def default_value_for_type(typ: object) -> object:
+    if typ is Byte or typ is UnsignedByte:
+        return Byte(0)
+    if typ is Short or typ is UnsignedShort:
+        return Short(0)
+    if typ is Int or typ is UnsignedInt:
+        return Int(0)
+    if typ is Long or typ is UnsignedLong:
+        return Long(0)
+    if typ is Float:
+        return Float(0.0)
+    if typ is Double:
+        return Double(0.0)
+    if typ is Bool:
+        return Bool(False)
+    if typ is Char:
+        return Char('\0')
+    if typ is String:
+        return String("")
+    return Null()
 def setField(className: ClassReference, fieldName: str, fieldModifier: str, fieldType: object, initialValue: object = Null(), isStatic: bool = False, isFinal: bool = False):
-    def default_value_for_type(typ: object) -> object:
-        if typ is Byte or typ is UnsignedByte:
-            return Byte(0)
-        if typ is Short or typ is UnsignedShort:
-            return Short(0)
-        if typ is Int or typ is UnsignedInt:
-            return Int(0)
-        if typ is Long or typ is UnsignedLong:
-            return Long(0)
-        if typ is Float:
-            return Float(0.0)
-        if typ is Double:
-            return Double(0.0)
-        if typ is Bool:
-            return Bool(False)
-        if typ is Char:
-            return Char('\0')
-        if typ is String:
-            return String("")
-        return Null()
     if isinstance(initialValue, Null):
         initialValue = default_value_for_type(initialValue)
     isValidModifier(fieldModifier)
@@ -348,6 +351,14 @@ def newObject(class_name: str) -> ObjectReference:
     heap[obj_id] = obj
     
     return ObjectReference(obj_id)
+def newPrimitiveArray(element_type: object, size: int, initial_values: list | None = None) -> 'PrimitiveArray':
+    if initial_values is None:
+        initial_values = []
+    if len(initial_values) < size:
+        default = default_value_for_type(element_type)
+        while len(initial_values) < size:
+            initial_values.append(default)
+    return PrimitiveArray(size, initial_values, element_type)
 
 class PrimitiveArray(Returnable):
     def __init__(self, size: int, initialValues: list, listType: object):
@@ -388,6 +399,12 @@ class PrimitiveArray(Returnable):
             'size': self.size,
             'type': self.listType
         }
+class PrimitiveArrayWrapper(PrimitiveArray):
+    def __init__(self, _type):
+        self._type = _type
+    def getArrayType(self):
+        return self._type
+
 
 class EvalTokens():
     TOKENS = {
@@ -949,6 +966,17 @@ def matchingParen(tokens: TokenSlice, openIdx: int) -> int:
             if depth == 0: 
                 return i
     raise SyntaxError('Unmatched parenthesis')
+def matchingBracket(tokens: TokenSlice, openIdx: int) -> int:
+    depth = 0
+    for i in range(openIdx, len(tokens)):
+        t = tokens[i].get()['type']
+        if t == 'LBRACKET':
+            depth += 1
+        elif t == 'RBRACKET':
+            depth -= 1
+            if depth == 0:
+                return i
+    raise SyntaxError('Unmatched bracket')
 def resolveDotChain(me: 'StackFrame | None', methodArgs: 'list | None', tokens: TokenSlice, startIdx: int):
     leftToken = tokens[startIdx]
     leftName = leftToken.get()['val']
@@ -1006,10 +1034,35 @@ def collapseTokenSlice(me: StackFrame | None, methodArgs: list | None, tokens: T
     while i < len(tokens):
         t = tokens[i].get()['type']
         if t == 'NEW':
-            className = tokens[i+1].get()['val']
-            closeIdx = matchingParen(tokens, i + 2)
-            out.append(Token.wrap(newObject(className)))  # TODO: constructors
-            i = closeIdx + 1
+            if i + 2 < len(tokens) and tokens[i + 2].get()['type'] == 'LBRACKET':
+                element_type_token = tokens[i + 1].get()['val']
+                element_type = parseTokenAsType(element_type_token)
+                
+                close_bracket = matchingBracket(tokens, i + 2)
+                
+                if close_bracket > i + 3:
+                    size_tokens = tokens[i + 3 : close_bracket]
+                    size_value = Expression.evaluate(me, methodArgs, size_tokens)
+                    if not isinstance(size_value, Int):
+                        raise RuntimeError("Array size must be an integer")
+                    size = size_value.get()
+                    array_obj = newPrimitiveArray(element_type, size)
+                    out.append(Token.wrap(array_obj))
+                else:
+                    # new int[] {1, 2, 3} - need to handle initializer list
+                    # This requires scanning for the '{' after the ']'
+                    # (Simplified: just create empty array with size 0)
+                    array_obj = newPrimitiveArray(element_type, 0)
+                    out.append(Token.wrap(array_obj))
+                
+                i = close_bracket + 1
+                continue
+            else:
+                className = tokens[i+1].get()['val']
+                closeIdx = matchingParen(tokens, i + 2)
+                out.append(Token.wrap(newObject(className)))
+                i = closeIdx + 1
+                continue
         elif t in ('IDENTIFIER', 'THIS') and i + 1 < len(tokens) and tokens[i + 1].get()['type'] == 'DOT':
             resolved, nextIdx = resolveDotChain(me, methodArgs, tokens, i)
             out.append(Token.wrap(resolved))
@@ -1020,6 +1073,20 @@ def collapseTokenSlice(me: StackFrame | None, methodArgs: list | None, tokens: T
                 raise RuntimeError(f"Cannot resolve '{tokens[i].get()['val']}' in this context (no active method call, e.g. inside a field initializer)")
             out.append(Token.wrap(resolveValue(me, methodArgs, tokens[i])))
             i += 1
+        elif t == 'IDENTIFIER' and i + 1 < len(tokens) and tokens[i + 1].get()['type'] == 'LBRACKET':
+            array_name = tokens[i].get()['val']
+            close_idx = matchingBracket(tokens, i + 1)
+            index_tokens = tokens[i + 2 : close_idx]
+            index_value = Expression.evaluate(me, methodArgs, index_tokens)
+            array_obj = resolveValue(me, methodArgs, tokens[i])
+            
+            if not isinstance(array_obj, PrimitiveArray):
+                raise RuntimeError(f"'{array_name}' is not an array")
+            
+            element = array_obj.get(index_value.get())
+            out.append(Token.wrap(element))
+            i = close_idx + 1
+            continue
         elif t == 'THIS':
             if me is None or me.this is None:
                 raise RuntimeError("Cannot use 'this' in static context")
@@ -1177,7 +1244,6 @@ class Expression:
 
         for tok in toRPN(tokens):
             t = tok.get()['type']
-            val = tok.get()['val']
             
             if t == 'LONG_LITERAL':
                 assumeType = 'long'
@@ -1399,6 +1465,60 @@ class Method:
             self.tokPosition += 2
             assignToClass = ClassReference(tok_val) if isClassAssign else None
             LocalAssignment.assign(self.me, self.args, [tok_val, var_name, isUnsignedType], self.read(self.peek(1), ';'), assignToClass)
+            return False
+        elif (tok_type in RETURN_TYPES) and self.peek().get()['type'] == 'LBRACKET': # Array definition
+            # Array declaration: int[] a = new int[10];
+            # Or: int[] a = {1, 2, 3};
+            
+            # Check if the next token after '[]' is an identifier
+            # We're at 'int', next is '['
+            bracket_pos = self.tokPosition + 1
+            if bracket_pos >= len(self.lang) or self.lang[bracket_pos].get()['type'] != 'LBRACKET':
+                return False
+            
+            # Skip past the '[]'
+            self.tokPosition = bracket_pos + 1  # skip '['
+            if self.tokPosition >= len(self.lang) or self.lang[self.tokPosition].get()['type'] != 'RBRACKET':
+                return False
+            
+            self.tokPosition += 1  # skip ']'
+            
+            # Now we should be at the variable name
+            if self.tokPosition >= len(self.lang) or self.lang[self.tokPosition].get()['type'] != 'IDENTIFIER':
+                return False
+            
+            var_name = self.lang[self.tokPosition].get()['val']
+            self.tokPosition += 1  # skip variable name
+            
+            # Next should be '='
+            if self.tokPosition >= len(self.lang) or self.lang[self.tokPosition].get()['type'] != 'ASSIGN':
+                # Could be ';' with no initializer? (int[] a;)
+                if self.lang[self.tokPosition].get()['type'] == 'SEMICOLON':
+                    # Store empty array
+                    self.me.setLocal(var_name, 'array', newPrimitiveArray(parseTokenAsType(tok_type), 0))
+                    self.tokPosition += 1
+                    return False
+                else:
+                    return False
+            
+            self.tokPosition += 1  # skip '='
+            
+            # Parse the RHS (new int[10] or {1,2,3})
+            rhs_tokens = []
+            while self.tokPosition < len(self.lang) and self.lang[self.tokPosition].get()['type'] != 'SEMICOLON':
+                rhs_tokens.append(self.lang[self.tokPosition])
+                self.tokPosition += 1
+            
+            if self.tokPosition >= len(self.lang) or self.lang[self.tokPosition].get()['type'] != 'SEMICOLON':
+                raise SyntaxError("Expected ';' after array declaration")
+            
+            self.tokPosition += 1  # skip ';'
+            
+            # Evaluate the RHS to get the array
+            array_value = Expression.evaluate(self.me, self.args, rhs_tokens)
+            
+            # Store it
+            self.me.setLocal(var_name, 'array', array_value)
             return False
         elif (tok_type == 'IDENTIFIER' or tok_type == 'THIS') and self.peek().get()['type'] == 'DOT': # Dot expr
             obj_token = token
@@ -2093,8 +2213,8 @@ def invokeMethod(className: str, methodName: str, args: list, caller: str, thisR
     m.execute()
     return popFrame().returnValue
 
-#
-content = (Path(__file__).parent / (input('Enter file name: ') + '.txt')).read_text(encoding="utf-8")
+#(input('Enter file name: ') + '.txt'
+content = (Path(__file__).parent / 'TestPyOOP.txt').read_text(encoding="utf-8")
 Exec = Execution(Intepreter(content)) 
 Exec.executeTokens()
 invokeMethod(ENTRY['entryClass'], ENTRY_METHOD_NAME, [], caller=ENTRY['entryClass'])
