@@ -20,6 +20,8 @@ class Numeric:
         return type(cls).__name__.lower()
 class Returnable: # Base class in class hierachy for anything that a method could return
     pass
+
+
 def toSigned(value: int, bits: int) -> int:
     mask = (1 << bits) - 1
     if isinstance(value, Int):
@@ -116,10 +118,6 @@ class ClassType(Returnable):
         return self.className
     def __repr__(self):
         return f"ClassType({self.className})"
-
-# Modifiers: public, private, protected, default
-# Static: True, False
-# Scope: subclass, this, other, otherPackage
 
 def isAllowedAtThisScope(modifier: str, thisScope: str) -> bool: 
     isValidModifier(modifier)
@@ -809,6 +807,7 @@ EvalTokens.TOKENS['long'], EvalTokens.TOKENS['char'], EvalTokens.TOKENS['String'
 OPERATORS = [EvalTokens.TOKENS['+'], EvalTokens.TOKENS['-'], EvalTokens.TOKENS['*'], EvalTokens.TOKENS['/'], EvalTokens.TOKENS['%']]
 BOOL_OPERATORS = [EvalTokens.SINGLE_CHAR_OP['>'], EvalTokens.SINGLE_CHAR_OP['<'], EvalTokens.TWO_CHAR_OP['&&'], EvalTokens.TWO_CHAR_OP['||'], EvalTokens.TWO_CHAR_OP['>='],
 EvalTokens.TWO_CHAR_OP['<='], EvalTokens.SINGLE_CHAR_OP['!'], EvalTokens.TWO_CHAR_OP['=='], EvalTokens.TWO_CHAR_OP['!=']]
+LOOP_ACTIONS = [EvalTokens.TOKENS['break'], EvalTokens.TOKENS['continue']]
 TokenSlice = list[Token]
 
 def parseTokenAsType(token: str, acceptVoid: bool = False, isUnsigned: bool = False) -> object:
@@ -1042,7 +1041,6 @@ def resolveValue(me: StackFrame | None, methodArgs: list | None, tok: Token):
             foundRetValue = getArgValById(methodArgs, name, me.method_name, me.class_name)
         except ValueError:
             pass
-
     isVarStatic = name in staticVariables.get(me.class_name, {})
     if foundRetValue is None:
         if me.this is not None and not isVarStatic:
@@ -1303,8 +1301,8 @@ class Method:
         self.methodBody = self.methodInfo['body']
         self.tokPosition = 0
 
-        self.ifConditionalStack = '' # Which if state are we at? ('main', 'fallback')
-        self.statementEnd = [] # End of the statement (in stack)
+        self.isInLoop = False
+        self.forLocalVar = {} # 'name', 'type', 'value'
     def read(self, token: Token, character: str) -> TokenSlice:
         startRead = self.lang.index(token)
         endRead = startRead
@@ -1346,8 +1344,13 @@ class Method:
                 if depth == 0:
                     break
             else:
-                if self.executeLine():
-                    return True  # Propagate up
+                result = self.executeLine()
+                if result == 'continue':
+                    return 'continue'
+                elif result == 'break':
+                    return 'break'
+                elif result is True:
+                    return True 
         return False
     def skipBlock(self):
         depth = 1
@@ -1625,18 +1628,94 @@ class Method:
             return False
         elif tok_type == 'WHILE':
             self.tokPosition += 1
-            condTokens = self.read(self.lang[self.tokPosition+1], ')')
-            condition = BooleanExpression.evaluate(self.me, self.me.getArgs(), condTokens)
-            loopBlockStart = self.tokPosition + len(condTokens) + 3
-            self.tokPosition = loopBlockStart  # Jump into the while block
-            while condition.get(): # Internally evaluate this loop
-                self.executeBlock()
-                self.tokPosition = loopBlockStart
-                condition = BooleanExpression.evaluate(self.me, self.me.getArgs(), condTokens)
-            self.skipBlock()
+            
+            if self.tokPosition >= len(self.lang) or self.lang[self.tokPosition].get()['type'] != 'LPAREN':
+                raise SyntaxError("Expected '(' after while")
+            self.tokPosition += 1
+            
+            cond_tokens = []
+            depth = 1
+            while self.tokPosition < len(self.lang):
+                t = self.lang[self.tokPosition].get()['type']
+                if t == 'LPAREN':
+                    depth += 1
+                elif t == 'RPAREN':
+                    depth -= 1
+                    if depth == 0:
+                        self.tokPosition += 1
+                        break
+                cond_tokens.append(self.lang[self.tokPosition])
+                self.tokPosition += 1
+            if self.tokPosition >= len(self.lang) or self.lang[self.tokPosition].get()['type'] != 'START_DECLARATION':
+                raise SyntaxError("Expected '{' after while condition")
+            self.tokPosition += 1
+            loop_start = self.tokPosition
+            self.isInLoop = True
+            while True:
+                condition = BooleanExpression.evaluate(self.me, self.args, cond_tokens)
+                if not condition.get():
+                    break
+                
+                self.tokPosition = loop_start
+                state = self.executeBlock()
+                
+                if state == 'break':
+                    break
+                elif state == 'continue':
+                    continue
+                elif state is True:
+                    self.isInLoop = False
+                    return True
+            self.isInLoop = False
+            while self.tokPosition < len(self.lang):
+                t = self.lang[self.tokPosition].get()['type']
+                if t == 'END_DECLARATION':
+                    self.tokPosition += 1
+                    break
+                self.tokPosition += 1
+            return False
+        elif tok_type == 'FOR':
+            # for (<type> <id> = <val>; <id_reference_condition>; <stmt?>)
+            # for (<type> <id> : <collectionID>)
+            parseIdBy = 0
+            isUnsigned = False 
+            if self.next(by=2) == 'unsigned':
+                isUnsigned = True
+                parseIdBy += 1
+            if self.next(by=4+parseIdBy) == '=':
+                forLoopStmt = self.read(self.peek(), ')')
+                idTypeRead = self.peek(by=2+parseIdBy).get()
+                if idTypeRead['type'] in RETURN_TYPES:
+                    idType = parseTokenAsType(idTypeRead['val'], isUnsigned=isUnsigned)
+                    idName = self.next(by=3+parseIdBy)
+                    idValue = Expression.evaluate(self.me, self.me.getArgs(), self.read(self.peek(by=5), ';'))
+                    self.forLocalVar[idName] = {
+                        'name': idName,
+                        'type': idType,
+                        'value': idValue
+                    }
+                else:
+                    resolveValue(self.me, self.me.getArgs(), self.next(by=3+parseIdBy)) # just check if it exists
+                print(self.forLocalVar)
+            elif self.next(by=4+parseIdBy) == ':':
+                pass
+            else:
+                raise RuntimeError(f'Could not evaluate iterable of {self.read(token, ')')}')
+        elif tok_type in LOOP_ACTIONS:  # 'break', 'continue'
+            self.tokPosition += 1 
+            if self.tokPosition < len(self.lang) and self.lang[self.tokPosition].get()['type'] == 'SEMICOLON':
+                self.tokPosition += 1
+            else:
+                raise SyntaxError(f"Expected ';' after {tok_type}")
+            
+            if not self.isInLoop:
+                raise RuntimeError(f"'{tok_type}' outside of loop")
+            
+            return tok_type.lower()  # 'break' or 'continue'
         elif tok_type == 'NATIVE_PRINT_STMT':
             value = Expression.evaluate(self.me, self.me.getArgs(), self.read(self.peek(2), ')'))
             print(value.get())
+
         self.tokPosition += 1
         return False
     def execute(self):
@@ -1977,3 +2056,5 @@ content = (Path(__file__).parent / (input('Enter file name: ') + '.txt')).read_t
 Exec = Execution(Intepreter(content)) 
 Exec.executeTokens()
 invokeMethod(ENTRY['entryClass'], ENTRY_METHOD_NAME, [], caller=ENTRY['entryClass'])
+
+input('Press enter to continue...')
