@@ -2,6 +2,28 @@ from typing import Any#, Optional
 import operator as pyop
 from pathlib import Path
 import struct
+import ctypes
+import sys
+print("file name(do not add the .txt part)")
+file_name = input() + ".txt"
+
+
+print("do you want to save the file(say y or n)")
+save = input()
+if save == "y":
+    user32 = ctypes.windll.user32
+
+    # Find a Notepad window by its title
+    hwnd = user32.FindWindowW(None, "*" + file_name + " - Notepad")  # Change the title if needed
+    if hwnd:
+        WM_COMMAND = 0x0111
+        ID_FILE_SAVE = 3  # Notepad's Save menu command
+        user32.SendMessageW(hwnd, WM_COMMAND, ID_FILE_SAVE, 0)
+    else:
+        print("Notepad window not found or was not needed to be updated")
+if save != "n" and save != "y":
+    print("??? that is not y or n run it again")
+    sys.exit()
 
 staticVariables: dict[str, dict] = {}
 staticMethods: dict[str, dict] = {}
@@ -2214,7 +2236,7 @@ def invokeMethod(className: str, methodName: str, args: list, caller: str, thisR
     return popFrame().returnValue
 
 #
-content = (Path(__file__).parent / (input('Enter file name: ') + '.txt')).read_text(encoding="utf-8")
+content = (Path(__file__).parent / file_name).read_text(encoding="utf-8")
 Exec = Execution(Intepreter(content)) 
 Exec.executeTokens()
 invokeMethod(ENTRY['entryClass'], ENTRY_METHOD_NAME, [], caller=ENTRY['entryClass'])
