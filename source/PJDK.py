@@ -993,7 +993,7 @@ def toRPN(tokens: TokenSlice) -> TokenSlice:
     
     return output
 NUMERIC_RANK = [Byte, UnsignedByte, Short, UnsignedShort, Int, UnsignedInt, Long, UnsignedLong, Float, Double]
-ARITHMETIC_OPS = {'PLUS','MINUS','MULTIPLY','DIVIDE','MODULO','INT_DIVIDE'}
+ARITHMETIC_OPS = {'PLUS','MINUS','MULTIPLY','DIVIDE','MODULO'}
 def promote(a: Returnable, b: Returnable):
     return type(a) if NUMERIC_RANK.index(type(a)) >= NUMERIC_RANK.index(type(b)) else type(b)
 BIN_OPS = {
@@ -1001,7 +1001,6 @@ BIN_OPS = {
     'MINUS': lambda a, b: a - b,
     'MULTIPLY': lambda a, b: a * b,
     'DIVIDE': lambda a, b: float(a / b),
-    'INT_DIVIDE': lambda a, b: int(a // b),
     'MODULO': lambda a, b: a % b,
     'GREATER': pyop.gt, 'LESS': pyop.lt,
     'GREATER_EQUAL': pyop.ge, 'LESS_EQUAL': pyop.le,
