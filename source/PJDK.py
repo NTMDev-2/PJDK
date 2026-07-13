@@ -366,8 +366,12 @@ def newPrimitiveArray(element_type: object, size: int, initial_values: list | No
 TokenSlice = list['Token']
 class PrimitiveArray(Returnable):
     def __init__(self, size: int, initialValues: list, listType: object):
-        if len(initialValues) > size:
+        if size < 0:
+            raise ValueError(f'The list size was initialized to an unexpected value, {size}')
+        if len(initialValues) < size:
             raise RuntimeError('List was initialized too large')
+        if len(initialValues) > size:
+            raise RuntimeError('List was initialized too small')
         self.values: list[object] = []
         self.size = size
         for i in initialValues:
@@ -455,13 +459,33 @@ class ArrayAssignment:
         if pos >= len(lang) or lang[pos].get()['type'] != 'SEMICOLON':
             raise SyntaxError("Expected ';' after array declaration")
         pos += 1
-        array_value = Expression.evaluate(me, methodArgs, rhs_tokens)
-        if not isinstance(array_value, PrimitiveArray):
-            raise RuntimeError(f"Cannot assign non-array value to array variable '{var_name}'")
-        if declared_size is not None and array_value.size != declared_size:
-            raise RuntimeError(
-                f"Array size mismatch for '{var_name}': declared size {declared_size}, got {array_value.size}"
-            )
+        # rhs: new <type> [] <START_DELC?> ...
+        #                         ^ Check here  
+        if rhs_tokens[4].get()['val'] == '{': # Initialize?
+            values = []
+            thisElementExpr = []
+            for token in rhs_tokens[5:]:
+                if token.get()['val'] == ',':
+                    values.append(Expression.evaluate(me, methodArgs, thisElementExpr))
+                    thisElementExpr = []
+                    isConsistentTypes(type(values[-1]), arrayType)
+                    continue
+                elif token.get()['val'] == '}':
+                    if len(thisElementExpr) > 0: 
+                        values.append(Expression.evaluate(me, methodArgs, thisElementExpr)) # Last element
+                    break
+                elif token.get()['type'] == 'EOF':
+                    raise RuntimeError('Reach end of line when more array values were expected')
+                thisElementExpr.append(token)
+            array_value = PrimitiveArray(len(values), values, arrayType)
+        else:
+            array_value = Expression.evaluate(me, methodArgs, rhs_tokens)
+            if not isinstance(array_value, PrimitiveArray):
+                raise RuntimeError(f"Cannot assign non-array value to array variable '{var_name}'")
+            if declared_size is not None and array_value.size != declared_size:
+                raise RuntimeError(
+                    f"Array size mismatch for '{var_name}': declared size {declared_size}, got {array_value.size}"
+                )
         
         return var_name, arrayType, array_value, pos
 
@@ -1117,7 +1141,7 @@ def collapseTokenSlice(me: StackFrame | None, methodArgs: list | None, tokens: T
                 if close_bracket > i + 3:
                     size_tokens = tokens[i + 3:close_bracket]
                     size_value = Expression.evaluate(me, methodArgs, size_tokens)
-                    if not isinstance(size_value, Int):
+                    if not isinstance(size_value, (Int, UnsignedInt)):
                         raise RuntimeError("Array size must be an integer")
                     declared_size = size_value.get()
 
@@ -1158,11 +1182,6 @@ def collapseTokenSlice(me: StackFrame | None, methodArgs: list | None, tokens: T
             out.append(Token.wrap(resolved))
             i = nextIdx
             continue
-        elif t == 'IDENTIFIER':
-            if me is None:
-                raise RuntimeError(f"Cannot resolve '{tokens[i].get()['val']}' in this context (no active method call, e.g. inside a field initializer)")
-            out.append(Token.wrap(resolveValue(me, methodArgs, tokens[i])))
-            i += 1
         elif t == 'IDENTIFIER' and i + 1 < len(tokens) and tokens[i + 1].get()['type'] == 'LBRACKET':
             array_name = tokens[i].get()['val']
             close_idx = matchingBracket(tokens, i + 1)
@@ -1177,6 +1196,11 @@ def collapseTokenSlice(me: StackFrame | None, methodArgs: list | None, tokens: T
             out.append(Token.wrap(element))
             i = close_idx + 1
             continue
+        elif t == 'IDENTIFIER':
+            if me is None:
+                raise RuntimeError(f"Cannot resolve '{tokens[i].get()['val']}' in this context (no active method call, e.g. inside a field initializer)")
+            out.append(Token.wrap(resolveValue(me, methodArgs, tokens[i])))
+            i += 1
         elif t == 'THIS':
             if me is None or me.this is None:
                 raise RuntimeError("Cannot use 'this' in static context")
