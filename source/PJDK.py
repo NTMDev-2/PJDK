@@ -28,6 +28,7 @@ def toSigned(value: int, bits: int) -> int:
     mask = (1 << bits) - 1
     if isinstance(value, Int):
         value = value.get()
+    value = int(value)
     value &= mask
     if value >= (1 << (bits - 1)):
         value -= (1 << bits)
@@ -49,15 +50,47 @@ class _IntegerBase(Numeric, Returnable):
     def get(self):
         return self.value
 
-class Byte(_IntegerBase):   bits = 8
-class Short(_IntegerBase):  bits = 16
-class Int(_IntegerBase):    bits = 32
-class Long(_IntegerBase):   bits = 64
+class Byte(_IntegerBase):
+    bits = 8
+    @classmethod
+    def get_bits(cls):
+        return cls.bits
+class Short(_IntegerBase):
+    bits = 16
+    @classmethod
+    def get_bits(cls):
+        return cls.bits
+class Int(_IntegerBase):
+    bits = 32
+    @classmethod
+    def get_bits(cls):
+        return cls.bits
+class Long(_IntegerBase):
+    bits = 64
+    @classmethod
+    def get_bits(cls):
+        return cls.bits
 
-class UnsignedByte(_IntegerBase):   bits = 8;  signed = False
-class UnsignedShort(_IntegerBase):  bits = 16; signed = False
-class UnsignedInt(_IntegerBase):    bits = 32; signed = False
-class UnsignedLong(_IntegerBase):   bits = 64; signed = False
+class UnsignedByte(_IntegerBase):
+    bits = 8;  signed = False
+    @classmethod
+    def get_bits(cls):
+        return cls.bits
+class UnsignedShort(_IntegerBase):
+    bits = 16; signed = False
+    @classmethod
+    def get_bits(cls):
+        return cls.bits
+class UnsignedInt(_IntegerBase):
+    bits = 32; signed = False
+    @classmethod
+    def get_bits(cls):
+        return cls.bits
+class UnsignedLong(_IntegerBase):
+    bits = 64; signed = False
+    @classmethod
+    def get_bits(cls):
+        return cls.bits
 
 class Double(Numeric, Returnable):
     bits = 64
@@ -65,11 +98,17 @@ class Double(Numeric, Returnable):
         if isinstance(value, (Float, Double)):
             value = value.get()
         self.value = float(value)
+    @classmethod
+    def get_bits(cls):
+        return cls.bits
     def get(self): return self.value
     def to_bytes(self): return struct.pack('>d', self.value)
     def __repr__(self): return f"Double({self.value})"
 class Float(Numeric, Returnable):
     bits = 32
+    @classmethod
+    def get_bits(cls):
+        return cls.bits
     def __init__(self, value: float = 0.0):
         if isinstance(value, (Float, Double)):
             value = value.get()
@@ -1186,7 +1225,7 @@ def collapseTokenSlice(me: StackFrame | None, methodArgs: list | None, tokens: T
             out.append(Token.wrap(resolved))
             i = nextIdx
             continue
-        elif t == '(' and tokens[i+1].get()['type'] in RETURN_TYPES and tokens[i+2].get()['val'] == ')' and tokens[i-1].get()['type'] != 'IDENTIFIER': # Casting
+        elif t == 'LPAREN' and i + 2 < len(tokens) and tokens[i+1].get()['type'] in RETURN_TYPES and tokens[i+2].get()['type'] == 'RPAREN' and (i == 0 or tokens[i-1].get()['type'] not in ('IDENTIFIER', 'RPAREN', 'RBRACKET')): # Casting
             # (<type>) <value> <...?>;
             castToType = tokens[i+1].get()['type']
             i += 3 # skip (<type>)
@@ -1205,8 +1244,10 @@ def collapseTokenSlice(me: StackFrame | None, methodArgs: list | None, tokens: T
                     break
                 castValues.append(tok)
             castValue = Expression.evaluate(me, me.getArgs(), castValues)
-            finalCastValue = convertValue(castValue, parseTokenAsType(castToType))
-            out.append(finalCastValue)
+            finalCastValue = convertValue(castValue, parseTokenAsType(castToType), allowLossy=True)
+            out.append(Token.wrap(finalCastValue))
+            i += len(castValues)
+            continue
         elif t == 'IDENTIFIER' and i + 1 < len(tokens) and tokens[i + 1].get()['type'] == 'LBRACKET':
             array_name = tokens[i].get()['val']
             close_idx = matchingBracket(tokens, i + 1)
@@ -1375,17 +1416,19 @@ def resolveOperand(me: StackFrame | None, methodArgs: list | None, tok: Token | 
     if t == 'STRING_LITERAL':
         return String(val)
     raise SyntaxError(f"Cannot resolve operand: {t} (value: '{val}')")
-def convertValue(value: object, target_type: object) -> object:
+def convertValue(value: object, target_type: object, allowLossy: bool = False) -> object:
     if isinstance(value, target_type):
         return value
 
     if isinstance(target_type, type) and issubclass(target_type, Numeric) and isinstance(value, Numeric):
         raw = value.get()
+        if hasattr(value, 'bits'):
+            if value.get_bits() > target_type.get_bits() and not allowLossy:
+                raise ValueError(f'Possible lossy conversion from {type(value).__name__} to {target_type.__name__}')
         try:
             return target_type(raw)
-        except Exception:
-            raise TypeError(f"Cannot convert {type(value).__name__} to {target_type.__name__}")
-    
+        except ValueError:
+            raise ValueError(f'Cannot convert {type(value).__name__} to {target_type.__name__}')
     if isinstance(target_type, ClassType) and isinstance(value, ObjectReference):
         return value
     if target_type is String or target_type == String:
