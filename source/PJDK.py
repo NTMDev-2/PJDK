@@ -377,7 +377,9 @@ class PrimitiveArray(Returnable):
             except Exception:
                 raise Exception(f'List value {i} has inconsistent type {type(i)}, when type {type(listType)} was expected')
         self.listType = listType
-    def get(self, elementByIndex: int):
+    def get(self, elementByIndex: int | None = None):
+        if elementByIndex is None:
+            return self.returnThis()['value']
         if elementByIndex < 0:
             raise Exception('Cannot have negative index')
         if elementByIndex > len(self.values):
@@ -408,12 +410,11 @@ class PrimitiveArrayWrapper(PrimitiveArray):
         self._type = _type
     def getArrayType(self):
         return self._type
-
 class ArrayAssignment:
     @staticmethod
     def parse(lang: TokenSlice, tokPosition: int, elementTypeTok: str,
               me: StackFrame | None = None, methodArgs: list | None = None):
-        # <type>[<size?>] <name> [= <value>];
+        # <type>[<int?>] <name> = new <type_consistent>[<int?>]<{args*}?>;
         arrayType = parseTokenAsType(elementTypeTok)
         pos = tokPosition + 1
         if pos >= len(lang) or lang[pos].get()['type'] != 'LBRACKET':
@@ -446,7 +447,7 @@ class ArrayAssignment:
         if lang[pos].get()['type'] != 'ASSIGN':
             raise SyntaxError("Expected '=' or ';' after array name")
         pos += 1
-
+        isConsistentTypes(parseTokenAsType(lang[pos+1].get()['val']), arrayType)
         rhs_tokens = []
         while pos < len(lang) and lang[pos].get()['type'] != 'SEMICOLON':
             rhs_tokens.append(lang[pos])
@@ -1552,11 +1553,11 @@ class Method:
     def executeLine(self):
         if self.tokPosition >= len(self.lang):
             return False
-        
+
         token = self.lang[self.tokPosition]
         tok_type = token.get()['type']
         tok_val = token.get()['val']
-        
+
         try:
             ClassReference(tok_val)
             isClassAssign = True
@@ -2294,7 +2295,7 @@ class Execution:
                         break
                     i -= 1
                 self.mode = []
-                result = ArrayAssignment.parse(self.lang, self.tokPosition, tok_type)  # me/methodArgs default None -> field context
+                result = ArrayAssignment.parse(self.lang, self.tokPosition, tok_type)
                 if result is None:
                     raise SyntaxError("Malformed array field declaration")
                 var_name, arrayType, array_value, self.tokPosition = result
