@@ -417,7 +417,7 @@ class PrimitiveArray(Returnable):
             try:
                 isConsistentTypes(i, listType)
             except Exception:
-                raise Exception(f'List value {i} has inconsistent type {type(i)}, when type {type(listType)} was expected')
+                raise Exception(f'List value {i} has inconsistent type {type(i).__name__}, when type {listType.__name__} was expected')
         self.listType = listType
     def get(self, elementByIndex: int | None = None):
         if elementByIndex is None:
@@ -489,7 +489,14 @@ class ArrayAssignment:
         if lang[pos].get()['type'] != 'ASSIGN':
             raise SyntaxError("Expected '=' or ';' after array name")
         pos += 1
-        isConsistentTypes(parseTokenAsType(lang[pos+1].get()['val']), arrayType)
+        if lang[pos+1].get()['type'] not in RETURN_TYPES: # Simple assignment?
+            try:
+                ClassReference(lang[pos+1].get()['val'])
+                isConsistentTypes(parseTokenAsType(lang[pos+1].get()['val']), arrayType)
+            except Exception:
+                pass
+        else:
+            isConsistentTypes(parseTokenAsType(lang[pos+1].get()['val']), arrayType)
         rhs_tokens = []
         while pos < len(lang) and lang[pos].get()['type'] != 'SEMICOLON':
             rhs_tokens.append(lang[pos])
@@ -499,10 +506,15 @@ class ArrayAssignment:
         pos += 1
         # rhs: new <type> [] <START_DELC?> ...
         #                         ^ Check here
-        if rhs_tokens[4].get()['val'] == '{': # Initialize?
+        rhs_As_Str = [t.get()['val'] for t in rhs_tokens]
+        try:
+            startInitIdx = rhs_As_Str.index('{')
+        except ValueError:
+            startInitIdx = -1 # Not?
+        if startInitIdx >= 0: # Initialize?
             values = []
             thisElementExpr = []
-            for token in rhs_tokens[5:]:
+            for token in rhs_tokens[startInitIdx+1:]:
                 if token.get()['val'] == ',':
                     values.append(Expression.evaluate(me, methodArgs, thisElementExpr))
                     thisElementExpr = []
@@ -524,7 +536,6 @@ class ArrayAssignment:
                 raise RuntimeError(
                     f"Array size mismatch for '{var_name}': declared size {declared_size}, got {array_value.size}"
                 )
-        
         return var_name, arrayType, array_value, pos
 
 class EvalTokens():
@@ -535,6 +546,7 @@ class EvalTokens():
         "]": "RBRACKET",
         "(": "LPAREN",
         ")": "RPAREN",
+        ":": "COLON",
         ";": "SEMICOLON",
         ",": "COMMA",
         ".": "DOT",
@@ -1559,7 +1571,7 @@ def perspectiveOfClass(_class: str, _relativeToClass: str) -> str:
     return 'other'
 def getSuperOfClass(class_name: str) -> str:
     h = getHierarchyOfClass(class_name)
-    return list(h.keys())[1]
+    return list(h.keys())[1] # <this_class>, <super_1>, <super_2>, ...
 
 class Return:
     @staticmethod
@@ -2169,7 +2181,63 @@ class Method:
                     del self.me.locals[idName]
                 self.isInLoop = False
             elif self.next(by=4+parseIdBy) == ':':
-                pass
+                forStmt = self.read(self.peek(), ')')
+                
+                colon_idx = -1
+                for i, tok in enumerate(forStmt):
+                    if tok.get()['val'] == ':':
+                        colon_idx = i
+                        break
+                
+                if colon_idx == -1:
+                    raise SyntaxError("Expected ':' in for-each loop")
+                
+                left_parts = forStmt[:colon_idx]
+                isUnsigned = False
+                if left_parts and left_parts[0].get()['val'] == 'unsigned':
+                    isUnsigned = True
+                    left_parts = left_parts[1:]
+                if left_parts[0].get()['val'] == '(': # Include '(' for some reason, strip it
+                    left_parts = left_parts[1:]
+                if len(left_parts) != 2: 
+                    raise SyntaxError("Malformed loop statement")
+                type_token = left_parts[0].get()['val']
+                var_name = left_parts[1].get()['val']
+                var_type = parseTokenAsType(type_token, isUnsigned=isUnsigned)
+                
+                collection_expr = forStmt[colon_idx + 1:]
+                collection = Expression.evaluate(self.me, self.args, collection_expr)
+                
+                if not isinstance(collection, PrimitiveArray):
+                    raise RuntimeError(f"Cannot iterate over non-array: {type(collection)}")
+                elements = collection.get()
+                self.tokPosition += len(forStmt) + 2
+                body_start = self.tokPosition
+                self.isInLoop = True
+                
+                for element in elements:
+                    self.me.setLocal(var_name, var_type, element)
+                    self.tokPosition = body_start
+                    state = self.executeBlock()
+                    
+                    if state == 'break':
+                        break
+                    elif state == 'continue':
+                        continue
+                    elif state is True:
+                        self.isInLoop = False
+                        return True
+                
+                del self.me.locals[var_name]
+                self.isInLoop = False
+                
+                while self.tokPosition < len(self.lang):
+                    if self.lang[self.tokPosition].get()['type'] == 'END_DECLARATION':
+                        self.tokPosition += 1
+                        break
+                    self.tokPosition += 1
+                
+                return False
             else:
                 raise RuntimeError(f'Could not evaluate iterable of {self.read(token, ")")[0].getPos()}')
         elif tok_type in LOOP_ACTIONS:  # 'break', 'continue'
