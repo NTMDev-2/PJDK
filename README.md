@@ -1,5 +1,5 @@
 # Python-JDK
-PJDK is an interesting and cool replica of the popular Java programming language by Oracle (originally by Sun Microsystems), created inside Python! 
+PJDK is an interesting and cool replica of the popular Java programming language by Oracle (originally by Sun Microsystems), created inside Python! (Also supports the C `unsigned` keyword since I think its important)
 
 To play with P-JDK, the source code is presented inside source/PJDK.py. Download it, and it requires Python 3.12+ Intepreter to run. 
 
@@ -8,7 +8,6 @@ Of course, code made inside P-JDK are hundreds or even thousands of times slower
 [Java SE Docs](https://docs.oracle.com/javase/8/docs/api/) was used to help create this
 
 # Supports
-***Note: In PJDK, the compiler accepts `unsigned` keyword for `Numeric` types, even though this is not in standard Java***
 P-JDK supports all basic Java syntax (and fully replicates it), like defining classes:
 ```
 public class Main { }
@@ -41,7 +40,7 @@ public class Main{
 ```
 Note: The entry class name is optional, and does not have to be the name of the file it is in (since this is not a real Java environment)
 
-(Currently, there is no support for command line arguments (`String[] args`), so do not create that argument)
+(Currently, there is no support for command line arguments (`String[] args`), so do not create that argument) (Coming Release 1.5.x potentially)
 
 If you have difficulty creating the entry point, download a pre-made one from source/PJDK_Template.txt
 
