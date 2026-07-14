@@ -5,6 +5,8 @@ To play with P-JDK, the source code is presented inside source/PJDK.py. Download
 
 Of course, code made inside P-JDK are hundreds or even thousands of times slower than a real JDK. Obviously, this is not meant to be actually used, and rather a cool project.
 
+[Java SE Docs](https://docs.oracle.com/javase/8/docs/api/) was used to help create this
+
 # Supports
 ***Note: In PJDK, the compiler accepts `unsigned` keyword for `Numeric` types, even though this is not in standard Java***
 P-JDK supports all basic Java syntax (and fully replicates it), like defining classes:
