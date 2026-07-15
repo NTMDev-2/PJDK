@@ -1,4 +1,3 @@
-# Release 1.4.5.5
 from typing import Any#, Optional
 import operator as pyop
 from pathlib import Path
@@ -191,6 +190,10 @@ def isConsistentTypes(thisType: object, otherType: object) -> bool:
     try:
         if issubclass(thisType, otherType) or issubclass(otherType, thisType):
             return True
+        # Same-bit-width integer types are interchangeable regardless of signedness
+        # (e.g. Byte <-> UnsignedByte, Short <-> UnsignedShort, Int <-> UnsignedInt, Long <-> UnsignedLong)
+        if issubclass(thisType, _IntegerBase) and issubclass(otherType, _IntegerBase) and thisType.bits == otherType.bits:
+            return True
     except TypeError:
         raise Exception(f'Type {otherType.__name__} does not support type {thisType.__name__}')
     
@@ -341,6 +344,7 @@ class StackFrame: # Method call information
         return self.args
     def setLocal(self, localName: str, localType: object, value: object):
         isConsistentTypes(localType, value)
+        value = coerceValue(value, localType)
         self.locals[localName] = {
             'name': localName,
             'type': localType,
@@ -351,7 +355,7 @@ class StackFrame: # Method call information
             raise RuntimeError(f'The local variable {localName} does not exist')
         localData = self.locals.get(localName, {})
         isConsistentTypes(newValue, localData['type'])
-        localData['value'] = newValue
+        localData['value'] = coerceValue(newValue, localData['type'])
     def getLocal(self, localName: str, receptorType: object, get: bool = False) -> dict:
         # get parameter means to simply get the variable, if it is set
         # If get = True, receptorType compiles to Null()
@@ -414,11 +418,11 @@ class PrimitiveArray(Returnable):
         self.values: list[object] = []
         self.size = size
         for i in initialValues:
-            self.values.append(i)
             try:
                 isConsistentTypes(i, listType)
             except Exception:
                 raise Exception(f'List value {i} has inconsistent type {type(i).__name__}, when type {listType.__name__} was expected')
+            self.values.append(coerceValue(i, listType))
         self.listType = listType
     def get(self, elementByIndex: int | None = None):
         if elementByIndex is None:
@@ -435,7 +439,7 @@ class PrimitiveArray(Returnable):
             raise Exception(f'Value {value} has inconsistent type {type(value)}, when type {type(self.listType)} was expected')
         if len(self.values) == self.size:
             raise Exception(f'List has reached maximum size of {self.size}')
-        self.values.append(value)
+        self.values.append(coerceValue(value, self.listType))
     def remove(self, elementByIndex: int):
         if elementByIndex < 0:
             raise Exception('Cannot have negative index')
@@ -960,7 +964,7 @@ OPERATORS = [EvalTokens.TOKENS['+'], EvalTokens.TOKENS['-'], EvalTokens.TOKENS['
 BOOL_OPERATORS = [EvalTokens.SINGLE_CHAR_OP['>'], EvalTokens.SINGLE_CHAR_OP['<'], EvalTokens.TWO_CHAR_OP['&&'], EvalTokens.TWO_CHAR_OP['||'], EvalTokens.TWO_CHAR_OP['>='],
 EvalTokens.TWO_CHAR_OP['<='], EvalTokens.SINGLE_CHAR_OP['!'], EvalTokens.TWO_CHAR_OP['=='], EvalTokens.TWO_CHAR_OP['!=']]
 LOOP_ACTIONS = [EvalTokens.TOKENS['break'], EvalTokens.TOKENS['continue']]
-
+RETURN_TYPE_STR = ('String', 'char', 'byte', 'short', 'int', 'long')
 
 def parseTokenAsType(token: str, acceptVoid: bool = False, isUnsigned: bool = False) -> object:
     match token:
@@ -1473,6 +1477,12 @@ def convertValue(value: object, target_type: object, allowLossy: bool = False) -
         else:
             return String(str(value))
     raise TypeError(f"Cannot convert {type(value).__name__} to {target_type.__name__}")
+def coerceValue(value: object, target_type: object) -> object:
+    if not isinstance(target_type, type) or not issubclass(target_type, Numeric):
+        return value
+    if not isinstance(value, Numeric) or isinstance(value, target_type):
+        return value
+    return convertValue(value, target_type, allowLossy=True)
 class Expression:
     @staticmethod
     def evaluate(me: StackFrame | None, methodArgs: list | None, tokens: TokenSlice, forceType: str = 'int') -> Returnable:
@@ -1594,6 +1604,13 @@ def perspectiveOfClass(_class: str, _relativeToClass: str) -> str:
 def getSuperOfClass(class_name: str) -> str:
     h = getHierarchyOfClass(class_name)
     return list(h.keys())[1] # <this_class>, <super_1>, <super_2>, ...
+def isClass(class_name: str) -> bool:
+    try:
+        ClassReference(class_name)
+        return True
+    except Exception:
+        return False
+
 
 class Return:
     @staticmethod
@@ -1603,7 +1620,7 @@ class Return:
             raise RuntimeError(f'Method "{me.method_name}" of class "{me.class_name}" has return statement, when return type is Void')
         retValue = Expression.evaluate(me, methodArgs, valueByToken)
         isConsistentTypes(retValue, thisMethodInfo['returns'])
-        me.returnValue = retValue
+        me.returnValue = coerceValue(retValue, thisMethodInfo['returns'])
 class LocalAssignment:
     @staticmethod
     def assign(me: StackFrame, methodArgs: list, assignArgs: list, valueByToken: TokenSlice, assignToClassType: ClassReference | None = None): #TODO: If assigning to a class, must provide another arugment for the type of variable assigning to.
@@ -1891,7 +1908,7 @@ class Method:
                             raise NameError(f"Static variable '{member_name}' not found in class '{obj_name}'")
                         isChangeable(staticVariables[obj_name][member_name])
                         isConsistentTypes(staticVariables[obj_name][member_name]['type'], type(new_value))
-                        staticVariables[obj_name][member_name]['value'] = new_value
+                        staticVariables[obj_name][member_name]['value'] = coerceValue(new_value, staticVariables[obj_name][member_name]['type'])
                         return False
                     else:
                         target = resolveValue(self.me, self.args, obj_token)
@@ -1906,14 +1923,14 @@ class Method:
                             if instance.className not in staticVariables or member_name not in staticVariables[instance.className]:
                                 raise RuntimeError(f"Static variable '{member_name}' not found")
                             isChangeable(staticVariables[instance.className][member_name])
-                            staticVariables[instance.className][member_name]['value'] = new_value
+                            staticVariables[instance.className][member_name]['value'] = coerceValue(new_value, staticVariables[instance.className][member_name]['type'])
                             return False
                         raise RuntimeError(f"Field '{member_name}' not found on object")
                     field_def = memory[instance.className]['fields'].get(member_name)
                     if field_def and field_def.get('final', False):
                         raise Exception(f"Cannot assign to final field '{member_name}'")
                     isConsistentTypes(field_def['type'], type(new_value))
-                    instance.fields[member_name] = new_value
+                    instance.fields[member_name] = coerceValue(new_value, field_def['type'])
                     return False
                 elif self.tokPosition < len(self.lang) and self.lang[self.tokPosition].get()['type'] in ('INC', 'DEC'):
                     # this.x++ / Object.x++ / obj.x++
@@ -1995,7 +2012,7 @@ class Method:
                     if field_def and field_def.get('final', False):
                         raise Exception(f"Cannot assign to final field '{var_name}'")
                     isConsistentTypes(field_def['type'], type(new_value))
-                    instance.fields[var_name] = new_value
+                    instance.fields[var_name] = coerceValue(new_value, field_def['type'])
                     updated = True
             
             # Static in super
@@ -2249,8 +2266,10 @@ class Method:
                     elif state is True:
                         self.isInLoop = False
                         return True
-                
-                del self.me.locals[var_name]
+                try:
+                    del self.me.locals[var_name]
+                except KeyError:
+                    print(f'[WARNING]: Skipped an empty loop variable, \'{var_name}\'')
                 self.isInLoop = False
                 
                 while self.tokPosition < len(self.lang):
@@ -2556,8 +2575,8 @@ class Execution:
                             raise Exception(f'The {ENTRY_METHOD_NAME} method must be public')
                         if self.before(by=2) != 'void':
                             raise Exception(f'The {ENTRY_METHOD_NAME} method must return void')
-                        if args:
-                            raise Exception(f'The {ENTRY_METHOD_NAME} method must not have any arguments')
+                        if len(args) > 1:
+                            raise Exception(f'The {ENTRY_METHOD_NAME} method must not have more than 1 argument')
                         ENTRY['entryClass'] = self.currentClass
             elif tok_type == EvalTokens.TOKENS[')']:
                 if self.info.get('parenStack', 0) == 0:
@@ -2588,7 +2607,13 @@ class Execution:
                 isValidReturnType(parseTokenAsType(arg_type_token, isUnsigned=self.states['UNSIGNED']))
                 arg_type = parseTokenAsType(arg_type_token, isUnsigned=self.states['UNSIGNED'])
             except ValueError:
-                arg_type = ClassReference(arg_type_token) # If it is not a primitive type, then it must be a class reference
+                if arg_type_token.split('[')[0] in RETURN_TYPE_STR or isClass(arg_type_token.split('[')[0]): # <type>, ]
+                    arrType = parseTokenAsType(arg_type_token.split('[')[0])
+                    arg_type = PrimitiveArrayWrapper(arrType)
+                elif isClass(arg_type_token):
+                    arg_type = ClassReference(arg_type_token) # If it is not a primitive type, then it must be a class reference
+                else:
+                    raise RuntimeError(f'Could not resolve the argument stream: {argReader}')
             self.info['thisMethodArgs'][arg_name] = arg_type # Do not set into self.argumentStack
         return self.info['thisMethodArgs']
     def handleNullFieldDefinition(self, _type: object, modifier: str):
@@ -2665,6 +2690,7 @@ def invokeMethod(className: str, methodName: str, args: list, caller: str, thisR
     mArgTypes = list(mInfo['args'].values())
     for mArgId in range(len(mArgTypes)):
         isConsistentTypes(args[mArgId], mArgTypes[mArgId])
+        args[mArgId] = coerceValue(args[mArgId], mArgTypes[mArgId])
     pushFrame(methodName, className, thisRef or newObject(className), args)
 
     mModifier = mInfo['modifier']
@@ -2690,12 +2716,26 @@ while choice == 'Retry':
     os.system('cls')
     if oldContent == content:
         print(f'[WARNING]: File reloading did not detect any changes in file. Did you save the file {fileName}?')
-    print('OUTPUT:\n')
     try:
         Exec = Execution(Intepreter(content))
         Exec.executeTokens()
         try:
-            invokeMethod(ENTRY['entryClass'], ENTRY_METHOD_NAME, [], caller=ENTRY['entryClass'])
+            if ENTRY['entryClass'] not in memory or ENTRY_METHOD_NAME not in memory[ENTRY['entryClass']]['methods']:
+                raise NameError(f'Could not resolve the entry method "{ENTRY_METHOD_NAME}". Please define it properly')
+            entryArgTypes = list(memory[ENTRY['entryClass']]['methods'][ENTRY_METHOD_NAME]['args'].values())
+            callArgs = []
+            if entryArgTypes:
+                userArgs = input('[ENTER ARGS]: ')
+                rawArgs = userArgs.split()
+                argType = entryArgTypes[0]
+                if isinstance(argType, PrimitiveArrayWrapper):
+                    elementType = argType.getArrayType()
+                    elements = [convertValue(String(a), elementType) for a in rawArgs]
+                    callArgs = [newPrimitiveArray(elementType, len(elements), elements)]
+                else:
+                    callArgs = [convertValue(String(' '.join(rawArgs)), argType)]
+            print('OUTPUT:\n')
+            invokeMethod(ENTRY['entryClass'], ENTRY_METHOD_NAME, callArgs, caller=ENTRY['entryClass'])
         except NameError:
             raise NameError(f'Could not resolve the entry method "{ENTRY_METHOD_NAME}". Please define it properly')
     except Exception as e:
