@@ -574,6 +574,7 @@ class EvalTokens():
         "void": "VOID",
         "null": "NULL",
         "if": "IF",
+        "import": "IMPORT_STMT",
         "else": "ELSE",
         "while": "WHILE",
         "for": "FOR",
@@ -2082,8 +2083,9 @@ class Method:
             self.tokPosition += 1  # skip '{'
             
             if condition.get():
-                if self.executeBlock():
-                    return True
+                result = self.executeBlock()
+                if result:
+                    return result
             else:
                 self.skipBlock()
             
@@ -2094,8 +2096,9 @@ class Method:
                     raise SyntaxError("Expected 'START_DECLARATION', 'IF' after else")
                 self.tokPosition += 1
                 if not condition.get():
-                    if self.executeBlock():
-                        return True
+                    result = self.executeBlock()
+                    if result:
+                        return result
                 else:
                     self.skipBlock()
             
@@ -2124,6 +2127,28 @@ class Method:
                 raise SyntaxError("Expected '{' after while condition")
             self.tokPosition += 1
             loop_start = self.tokPosition
+
+            # Pre-scan to find the position right after the matching '}' so we can
+            # reliably resume execution there regardless of how the loop terminates
+            # (normal condition failure, break, or an early method return).
+            scan = loop_start
+            depth = 1
+            closed = False
+            while scan < len(self.lang):
+                t = self.lang[scan].get()['type']
+                if t == 'START_DECLARATION':
+                    depth += 1
+                elif t == 'END_DECLARATION':
+                    depth -= 1
+                    if depth == 0:
+                        scan += 1
+                        closed = True
+                        break
+                scan += 1
+            if not closed:
+                raise SyntaxError("Expected '}' to close 'while' block")
+            after_while_pos = scan
+
             self.isInLoop = True
             while True:
                 condition = BooleanExpression.evaluate(self.me, self.args, cond_tokens)
@@ -2141,12 +2166,78 @@ class Method:
                     self.isInLoop = False
                     return True
             self.isInLoop = False
-            while self.tokPosition < len(self.lang):
-                t = self.lang[self.tokPosition].get()['type']
-                if t == 'END_DECLARATION':
-                    self.tokPosition += 1
+            self.tokPosition = after_while_pos
+            return False
+        elif tok_type == 'DO':
+            # do { <block> } while (<condition>);
+            self.tokPosition += 1
+            if self.tokPosition >= len(self.lang) or self.lang[self.tokPosition].get()['type'] != 'START_DECLARATION':
+                raise SyntaxError("Expected '{' after 'do'")
+            self.tokPosition += 1
+            loop_start = self.tokPosition
+
+            # Locate the matching '}' for the do-block (without executing it) so we can
+            # parse the trailing 'while (<condition>);' clause once, up front.
+            scan = loop_start
+            depth = 1
+            closed = False
+            while scan < len(self.lang):
+                t = self.lang[scan].get()['type']
+                if t == 'START_DECLARATION':
+                    depth += 1
+                elif t == 'END_DECLARATION':
+                    depth -= 1
+                    if depth == 0:
+                        scan += 1
+                        closed = True
+                        break
+                scan += 1
+            if not closed:
+                raise SyntaxError("Expected '}' to close 'do' block")
+
+            if scan >= len(self.lang) or self.lang[scan].get()['type'] != 'WHILE':
+                raise SyntaxError("Expected 'while' after 'do' block")
+            scan += 1
+            if scan >= len(self.lang) or self.lang[scan].get()['type'] != 'LPAREN':
+                raise SyntaxError("Expected '(' after 'while' in do-while")
+            scan += 1
+
+            cond_tokens = []
+            cdepth = 1
+            while scan < len(self.lang):
+                t = self.lang[scan].get()['type']
+                if t == 'LPAREN':
+                    cdepth += 1
+                elif t == 'RPAREN':
+                    cdepth -= 1
+                    if cdepth == 0:
+                        scan += 1
+                        break
+                cond_tokens.append(self.lang[scan])
+                scan += 1
+
+            if scan >= len(self.lang) or self.lang[scan].get()['type'] != 'SEMICOLON':
+                raise SyntaxError("Expected ';' after do-while condition")
+            after_do_while_pos = scan + 1
+
+            self.isInLoop = True
+            while True:
+                self.tokPosition = loop_start
+                state = self.executeBlock()
+
+                if state == 'break':
                     break
-                self.tokPosition += 1
+                elif state is True:
+                    self.isInLoop = False
+                    return True
+                # 'continue' (or normal completion) falls through to the condition check,
+                # matching do-while semantics where 'continue' jumps to the condition test.
+
+                condition = BooleanExpression.evaluate(self.me, self.args, cond_tokens)
+                if not condition.get():
+                    break
+            self.isInLoop = False
+            self.tokPosition = after_do_while_pos
             return False
         elif tok_type == 'FOR':
             # for (<type?> <id> = <val>; <id_reference_condition>; <stmt?>)
@@ -2182,7 +2273,31 @@ class Method:
                     resolveValue(self.me, self.me.getArgs(), self.peek(by=3+parseIdBy)) # just check if it exists
                     wasLocallyDefined = False
                 self.tokPosition += len(forLoopStmt) + 2
+                if self.tokPosition >= len(self.lang) or self.lang[self.tokPosition].get()['type'] != 'START_DECLARATION':
+                    raise SyntaxError("Expected '{' after for-loop header")
+                self.tokPosition += 1
                 body_start = self.tokPosition 
+
+                # Pre-scan to find the position right after the matching '}' so we can
+                # reliably resume execution there regardless of how the loop terminates.
+                scan = body_start
+                depth = 1
+                closed = False
+                while scan < len(self.lang):
+                    t = self.lang[scan].get()['type']
+                    if t == 'START_DECLARATION':
+                        depth += 1
+                    elif t == 'END_DECLARATION':
+                        depth -= 1
+                        if depth == 0:
+                            scan += 1
+                            closed = True
+                            break
+                    scan += 1
+                if not closed:
+                    raise SyntaxError("Expected '}' to close 'for' block")
+                after_for_pos = scan
+
                 self.isInLoop = True
                 while True:
                     condition_result = BooleanExpression.evaluate(self.me, self.args, condition)
@@ -2219,6 +2334,7 @@ class Method:
                 if wasLocallyDefined:
                     del self.me.locals[idName]
                 self.isInLoop = False
+                self.tokPosition = after_for_pos
             elif self.next(by=4+parseIdBy) == ':':
                 forStmt = self.read(self.peek(), ')')
                 
@@ -2251,7 +2367,31 @@ class Method:
                     raise RuntimeError(f"Cannot iterate over non-array: {type(collection)}")
                 elements = collection.get()
                 self.tokPosition += len(forStmt) + 2
+                if self.tokPosition >= len(self.lang) or self.lang[self.tokPosition].get()['type'] != 'START_DECLARATION':
+                    raise SyntaxError("Expected '{' after for-each header")
+                self.tokPosition += 1
                 body_start = self.tokPosition
+
+                # Pre-scan to find the position right after the matching '}' so we can
+                # reliably resume execution there regardless of how the loop terminates.
+                scan = body_start
+                depth = 1
+                closed = False
+                while scan < len(self.lang):
+                    t = self.lang[scan].get()['type']
+                    if t == 'START_DECLARATION':
+                        depth += 1
+                    elif t == 'END_DECLARATION':
+                        depth -= 1
+                        if depth == 0:
+                            scan += 1
+                            closed = True
+                            break
+                    scan += 1
+                if not closed:
+                    raise SyntaxError("Expected '}' to close 'for' block")
+                after_for_pos = scan
+
                 self.isInLoop = True
                 
                 for element in elements:
@@ -2266,17 +2406,10 @@ class Method:
                     elif state is True:
                         self.isInLoop = False
                         return True
-                try:
-                    del self.me.locals[var_name]
-                except KeyError:
-                    print(f'[WARNING]: Skipped an empty loop variable, \'{var_name}\'')
-                self.isInLoop = False
                 
-                while self.tokPosition < len(self.lang):
-                    if self.lang[self.tokPosition].get()['type'] == 'END_DECLARATION':
-                        self.tokPosition += 1
-                        break
-                    self.tokPosition += 1
+                del self.me.locals[var_name]
+                self.isInLoop = False
+                self.tokPosition = after_for_pos
                 
                 return False
             else:
@@ -2421,6 +2554,23 @@ class Execution:
                     self.info['isInClass'] = False
                 else:
                     raise SyntaxError(f'Unexpected closing brace at pos {token.getPos()["pos"]}')
+            elif tok_type == EvalTokens.TOKENS['import']:
+                directory = [a.get()['val'] for a in self.read(token, ';')[1:]]
+                filePath = ''
+                for text in directory:
+                    if text == '.':
+                        filePath += '/'
+                        continue
+                    filePath += text
+                filePath += '.txt' # Add .txt
+                filePath = (Path(__file__).parent / 'packages' / filePath)
+                try:
+                    thisPackageContent = filePath.read_text('utf-8')
+                except FileNotFoundError:
+                    raise FileNotFoundError(f'The specified package, "{''.join(directory)}", does not exist in the packages folder')
+                print(f'[INFO]: Loading package {''.join(directory)}...')
+                packageExecutor = Execution(Intepreter(thisPackageContent))
+                packageExecutor.executeTokens()
             elif tok_type == EvalTokens.TOKENS['class']:
                 if self.info.get('isInClass', False):
                     raise SyntaxError('Cannot define a class inside another class')
@@ -2716,6 +2866,7 @@ while choice == 'Retry':
     os.system('cls')
     if oldContent == content:
         print(f'[WARNING]: File reloading did not detect any changes in file. Did you save the file {fileName}?')
+    print('OUTPUT:\n')
     try:
         Exec = Execution(Intepreter(content))
         Exec.executeTokens()
@@ -2734,7 +2885,6 @@ while choice == 'Retry':
                     callArgs = [newPrimitiveArray(elementType, len(elements), elements)]
                 else:
                     callArgs = [convertValue(String(' '.join(rawArgs)), argType)]
-            print('OUTPUT:\n')
             invokeMethod(ENTRY['entryClass'], ENTRY_METHOD_NAME, callArgs, caller=ENTRY['entryClass'])
         except NameError:
             raise NameError(f'Could not resolve the entry method "{ENTRY_METHOD_NAME}". Please define it properly')
