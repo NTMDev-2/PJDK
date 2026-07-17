@@ -28,6 +28,10 @@ alice.sayHello();
 ```
 And much more!
 
+# Limitations
+- There is no package system, so the `protected` keyword is essentially `default`.
+- Much slower than an actual java runtime
+
 # How to Use
 To create a file that is readable by PJDK, create a simple text document in the SAME directory as the executable. Then, upon running the PJDK, type in the name of this file. 
 
