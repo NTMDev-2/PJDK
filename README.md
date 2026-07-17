@@ -4,6 +4,7 @@ PJDK is an interesting and cool replica of the popular Java programming language
 To play with P-JDK, the source code is presented inside source/PJDK.py. Download it, and it requires Python 3.12+ Intepreter to run. 
 
 Of course, code made inside P-JDK are hundreds or even thousands of times slower than a real JDK. Obviously, this is not meant to be actually used, and rather a cool project.
+One small advantage of this is that this skips the need of downloading a JDK or JRE and a JVM. This may be useful for quick tests, since is skips any use for `javac` to compile it, but directly imitates java. 
 
 [Java SE Docs](https://docs.oracle.com/javase/8/docs/api/) was used to help create this
 
