@@ -16,7 +16,7 @@ ENTRY = {'entryClass': '', 'entryMethod': ENTRY_METHOD_NAME}
 nextHeapId = 0
 heap: dict = {}
 
-memory: dict = {'Object': {'name': 'Object'}}
+memory: dict = {'Object': {'name': 'Object', 'methods': {}, 'fields': {}}}
 interfaces: dict = {}
 
 class Numeric:
@@ -361,6 +361,24 @@ def createClass(className: str, classModifier: str, superClass: ClassReference =
         for _, field in list(class_data['fields'].items()):
             if field['modifier'] == 'public':
                 inherited_fields[field['name']] = field
+
+    for ifaceName in implements:
+        if not isInterface(ifaceName):
+            raise NameError(f'Interface {ifaceName} does not exist')
+        for thisIface in [ifaceName] + getHierarchyOfInterface(ifaceName):
+            iface_info = interfaces[thisIface]
+            for m_name, m_body in iface_info['methods'].items():
+                if m_name not in inherited and m_body.get('body'):
+                    inherited[m_name] = {
+                        'name': m_body['name'],
+                        'modifier': m_body['modifier'],
+                        'returns': m_body['returns'],
+                        'static': False,
+                        'args': m_body['args'],
+                        'throws': m_body.get('throws', []),
+                        'body': m_body['body'],
+                    }
+
     memory[className] = {
         'name': className,
         'super': superClass,
@@ -399,15 +417,16 @@ def argsList(args: dict[str, object]) -> dict: # This sets and compiles an argum
             continue
     return args
 
-def createInterface(interfaceName: str):
-    if interfaceName in interfaces:
+def createInterface(interfaceName: str, superInterfaces: list[str] = []):
+    if isInterface(interfaceName):
         raise NameError(f'Interface {interfaceName} is already defined')
     interfaces[interfaceName] = {
         'name': interfaceName,
+        'super': superInterfaces,
         'methods': {},
     }
 def setInterfaceField(interfaceName: str, fieldName: str, fieldType: object, initialValue: object = None):
-    if interfaceName not in interfaces:
+    if not isInterface(interfaceName):
         raise NameError(f"Interface '{interfaceName}' does not exist")
     
     if initialValue is not None:
@@ -426,7 +445,7 @@ def setInterfaceField(interfaceName: str, fieldName: str, fieldType: object, ini
         'final': True,
         'isInterface': True # Special tag for interface fields
     }
-def setInterfaceMethod(interfaceName: str, methodName: str, methodReturnType: object, methodModifier: str, methodArgs: dict = {}, throws: list = []):
+def setInterfaceMethod(interfaceName: str, methodName: str, methodReturnType: object, methodModifier: str, methodArgs: dict = {}, throws: list = [], isAbstract: bool = True, isStatic: bool = False):
     isValidReturnType(methodReturnType)
     isValidModifier(methodModifier)
     interfaceInfo = interfaces.get(interfaceName, {})
@@ -436,7 +455,9 @@ def setInterfaceMethod(interfaceName: str, methodName: str, methodReturnType: ob
         'modifier': methodModifier,
         'returns': methodReturnType,
         'args': methodArgs,
-        'throws': throws
+        'throws': throws,
+        'abstract': isAbstract,
+        'static': isStatic
     }
 
 def default_value_for_type(typ: object) -> object:
@@ -1180,10 +1201,9 @@ def parseTokenAsType(token: str, acceptVoid: bool = False, isUnsigned: bool = Fa
         case 'STRING_TYPE' | 'String' | 'STRING_LITERAL':
             return String
         case _:
-            try:
-                _a = ClassReference(token)
+            if isClass(token):
                 return ClassType
-            except Exception:
+            else:
                 raise ValueError(f"Unknown type token: '{token}'")
 def prettyPrint(this: dict):
     import json
@@ -1191,7 +1211,11 @@ def prettyPrint(this: dict):
 def getArgValById(args: list, nameOfArg: str, methodName: str, className: str):
     # Returns argument val based on the argument id (the name of the argument)
     methodArgs: dict = {}
-    for _, method in list(memory[className]['methods'].items()):
+    if className in memory:
+        search = memory
+    elif className in interfaces:
+        search = interfaces
+    for _, method in list(search[className]['methods'].items()):
         if method['name'] == methodName:
             methodArgs = method['args']
     argPos = list(methodArgs.keys())
@@ -1344,10 +1368,9 @@ def resolveDotChain(me: 'StackFrame | None', methodArgs: 'list | None', tokens: 
             raise SyntaxError("Expected identifier after '.'")
         memberName = tokens[j + 1].get()['val']
         isCall = j + 2 < len(tokens) and tokens[j + 2].get()['type'] == 'LPAREN'
-
         if className in memory and memberName in memory[className]['methods']:
             method_info = memory[className]['methods'][memberName]
-            if not method_info.get('static', False):
+            if not method_info.get('static', False) and not className:
                 raise RuntimeError(f"Method '{memberName}' in class '{className}' is not static")
         callerClass = me.class_name if me is not None else (className if className else '')
 
@@ -1403,7 +1426,6 @@ def resolveDotChain(me: 'StackFrame | None', methodArgs: 'list | None', tokens: 
                     raise RuntimeError(f"Field '{memberName}' not found in class '{field_class}'")
                 j += 2
                 continue
-        
         # Main.add()
         elif isinstance(current, str) and isCall:
             className = current
@@ -1420,6 +1442,12 @@ def resolveDotChain(me: 'StackFrame | None', methodArgs: 'list | None', tokens: 
                 thisScope = perspectiveOfClass(callerClass, className)
                 isAllowedAtThisScope(method_info['modifier'], thisScope)
                 current = invokeMethod(className, memberName, evaledArgs, caller=callerClass, thisRef=None)
+                j = closeIdx + 1
+            elif isInterface(className):
+                method_info = interfaces[className]['methods'][memberName]
+                thisScope = perspectiveOfClass(callerClass, className)
+                isAllowedAtThisScope(method_info['modifier'], thisScope)
+                current = invokeMethod(className, memberName, evaledArgs, caller=callerClass, thisRef=None, isInterfaceMethod=True)
                 j = closeIdx + 1
             else:
                 raise RuntimeError(f"Static method '{memberName}' not found in class '{className}'")
@@ -1530,7 +1558,6 @@ def collapseTokenSlice(me: StackFrame | None, methodArgs: list | None, tokens: T
                     open_paren = i + 1
                     close_paren = matchingParen(tokens, open_paren)
                     
-                    # Extract arguments between the parentheses
                     arg_tokens = tokens[open_paren + 1 : close_paren]
                     arg_groups = Token.splitArgs(arg_tokens)
                     evaled_args = [Expression.evaluate(me, methodArgs, group) for group in arg_groups]
@@ -1539,7 +1566,43 @@ def collapseTokenSlice(me: StackFrame | None, methodArgs: list | None, tokens: T
                     out.append(Token.wrap(result))
                     i = close_paren + 1
                     continue
-            raise RuntimeError(f'Cannot invoke a non-static method {methodName} in a static context')
+                
+                if me.class_name in interfaces:
+                    interface_info = interfaces[me.class_name]
+                    if methodName in interface_info['methods']:
+                        method_info = interface_info['methods'][methodName]
+                        if method_info.get('static', False):
+                            open_paren = i + 1
+                            close_paren = matchingParen(tokens, open_paren)
+                            
+                            arg_tokens = tokens[open_paren + 1 : close_paren]
+                            arg_groups = Token.splitArgs(arg_tokens)
+                            evaled_args = [Expression.evaluate(me, methodArgs, group) for group in arg_groups]
+                            
+                            result = invokeMethod(me.class_name, methodName, evaled_args, caller=me.class_name, isInterfaceMethod=True)
+                            out.append(Token.wrap(result))
+                            i = close_paren + 1
+                            continue
+                
+                if hasattr(me, 'class_name') and me.class_name in interfaces:
+                    for iface_name in [me.class_name] + getHierarchyOfInterface(me.class_name):
+                        if iface_name in interfaces and methodName in interfaces[iface_name]['methods']:
+                            method_info = interfaces[iface_name]['methods'][methodName]
+                            if method_info.get('static', False):
+                                open_paren = i + 1
+                                close_paren = matchingParen(tokens, open_paren)
+                                
+                                arg_tokens = tokens[open_paren + 1 : close_paren]
+                                arg_groups = Token.splitArgs(arg_tokens)
+                                evaled_args = [Expression.evaluate(me, methodArgs, group) for group in arg_groups]
+                                
+                                result = invokeMethod(iface_name, methodName, evaled_args, caller=me.class_name, isInterfaceMethod=True)
+                                out.append(Token.wrap(result))
+                                i = close_paren + 1
+                                break
+            
+            out.append(tokens[i])
+            i += 1
         elif t == 'IDENTIFIER':
             if i + 1 < len(tokens) and tokens[i + 1].get()['type'] == 'LPAREN':
                 out.append(tokens[i])
@@ -1581,10 +1644,12 @@ def resolveValue(me: StackFrame | None, methodArgs: list | None, tok: Token):
         elif isVarStatic:
             foundRetValue = staticVariables[me.class_name][name]['value']
         else:
-            try:
+            if isClass(name):
                 foundRetValue = ClassReference(name)
-            except Exception:
-                pass
+    if foundRetValue is None:
+        if isInterface(name):
+            foundRetValue = name
+            
     if foundRetValue is None:
         raise RuntimeError(f"'{name}' is not a local variable, argument, field, or static member of '{me.class_name}'")
     elif isinstance(foundRetValue, Null):
@@ -1705,6 +1770,32 @@ def coerceValue(value: object, target_type: object) -> object:
     if not isinstance(value, Numeric) or isinstance(value, target_type):
         return value
     return convertValue(value, target_type, allowLossy=True)
+
+def validateInterfaceImplementation(className: str, interfaceName: str):
+    if not isInterface(interfaceName):
+        raise NameError(f"Interface '{interfaceName}' not found")
+    
+    class_info = memory[className]
+
+    for thisIface in [interfaceName] + getHierarchyOfInterface(interfaceName):
+        interface_info = interfaces[thisIface]
+
+        for method_name, method_def in interface_info['methods'].items():
+
+            if method_name not in class_info['methods'] and interface_info['methods'][method_name]['abstract']:
+                raise NotImplementedError(f"Class '{className}' does not implement method '{method_name}' from interface '{thisIface}'")
+
+            try:
+                class_method = class_info['methods'][method_name]
+                if class_method['returns'] != method_def['returns']:
+                    raise TypeError(
+                        f"Return type mismatch for '{method_name}': "
+                        f"interface expects {method_def['returns']}, "
+                        f"class provides {class_method['returns']}"
+                    )
+            except KeyError:
+                continue
+        
 class Expression:
     @staticmethod
     def evaluate(me: StackFrame | None, methodArgs: list | None, tokens: TokenSlice, forceType: str = 'int') -> Returnable:
@@ -1816,17 +1907,38 @@ def getHierarchyOfClass(class_name: str) -> dict[str, dict]:
         hierarchy['Object'] = memory['Object']
     return hierarchy
 def perspectiveOfClass(_class: str, _relativeToClass: str) -> str:
+    if not isClass(_class) and not isInterface(_class):
+        raise NameError(f'Class or interface {_class} is not defined')
+    elif not isClass(_relativeToClass) and not isInterface(_relativeToClass):
+        raise NameError(f'Class or interface {_relativeToClass} is not defined') 
+
     if _class == _relativeToClass:
         return 'this'
-    # _class is the caller; _relativeToClass is the class that owns the member
-    # being accessed. The caller counts as a "subclass" for protected-access
-    # purposes only if the owning class is one of the caller's ancestors
-    # (i.e. the caller extends, directly or transitively, the owning class).
-    hierarchy = getHierarchyOfClass(_class)
+    if isInterface(_class):
+        hierarchy = getHierarchyOfInterface(_class)
+    else:
+        hierarchy = getHierarchyOfClass(_class)
+
     if _relativeToClass in hierarchy:
         return 'subclass'
     
     return 'other'
+
+def getSuperOfInterface(interfaceName: str) -> list[str]:
+    if not isInterface(interfaceName):
+        raise NameError(f'Interface {interfaceName} does not exist')
+    return interfaces[interfaceName]['super']
+def getHierarchyOfInterface(interfaceName: str) -> list[str]:
+    """Returns every interface transitively extended by interfaceName (not including itself)."""
+    hierarchy: list[str] = []
+    def visit(name: str):
+        for superName in getSuperOfInterface(name):
+            if superName not in hierarchy:
+                hierarchy.append(superName)
+                visit(superName)
+    visit(interfaceName)
+    return hierarchy
+
 def getSuperOfClass(class_name: str) -> str:
     h = getHierarchyOfClass(class_name)
     return list(h.keys())[1] # <this_class>, <super_1>, <super_2>, ...
@@ -1836,11 +1948,19 @@ def isClass(class_name: str) -> bool:
         return True
     except Exception:
         return False
+def isInterface(interfaceName: str) -> bool:
+    return interfaceName in interfaces
+def classOrInterfaceInfo(name: str) -> dict:
+    if name in memory:
+        return memory[name]
+    if name in interfaces:
+        return interfaces[name]
+    raise NameError(f"Class or interface '{name}' is not defined")
 
 class Return:
     @staticmethod
     def ret(me: StackFrame, methodArgs: list, valueByToken: TokenSlice):
-        thisMethodInfo = memory[me.class_name]['methods'][me.method_name]
+        thisMethodInfo = classOrInterfaceInfo(me.class_name)['methods'][me.method_name]
         if thisMethodInfo['returns'] is Void:
             raise RuntimeError(f'Method "{me.method_name}" of class "{me.class_name}" has return statement, when return type is Void')
         retValue = Expression.evaluate(me, methodArgs, valueByToken)
@@ -1878,7 +1998,14 @@ class Method:
         self.className = currentFrame().class_name
         self.methodName = currentFrame().method_name
         self.args = currentFrame().getArgs()
-        self.methodInfo = memory[self.className]['methods'][self.methodName]
+        if self.className in memory:
+            self.methodInfo = memory[self.className]['methods'][self.methodName]
+            self.isInterfaceMethod = False
+        elif self.className in interfaces:
+            self.methodInfo = interfaces[self.className]['methods'][self.methodName]
+            self.isInterfaceMethod = True
+        else:
+            raise NameError(f"Class/Interface '{self.className}' not found")
         self.methodBody = self.methodInfo['body']
         self.tokPosition = 0
 
@@ -1986,11 +2113,8 @@ class Method:
         tok_type = token.get()['type']
         tok_val = token.get()['val']
 
-        try:
-            ClassReference(tok_val)
-            isClassAssign = True
-        except Exception:
-            isClassAssign = False
+        isClassAssign = isClass(tok_val)
+
         if (tok_type in RETURN_TYPES or isClassAssign) and (self.next(by=2) == '=' or self.next(by=2) == ';'): # Local definition
             # <type> <name> = <value>;
             # <type> <name>;
@@ -2106,6 +2230,9 @@ class Method:
                     # Static method call: ClassName.method()
                     target_class = obj_name
                     target = None
+                elif obj_name in interfaces:
+                    target_class = obj_name 
+                    target = None
                 else:
                     target = resolveValue(self.me, self.args, obj_token)
                     if not isinstance(target, ObjectReference):
@@ -2131,7 +2258,9 @@ class Method:
                     )
                 else:
                     # Instance
-                    if member_name not in memory[target_class]['methods']:
+                    search = memory if not isInterface(target_class) else interfaces
+
+                    if member_name not in search[target_class]['methods']:
                         raise NameError(f"Method '{member_name}' not found in class '{target_class}'")
                     invokeMethod(
                         target_class,
@@ -2139,7 +2268,8 @@ class Method:
                         evaledArgs,
                         caller=self.me.class_name,
                         thisRef=target,
-                        startClass = start_class
+                        startClass = start_class, 
+                        isInterfaceMethod = isInterface(target_class)
                     )
                 self.tokPosition = closeIdx + 1
                 if self.tokPosition < len(self.lang) and self.lang[self.tokPosition].get()['type'] == 'SEMICOLON':
@@ -2299,21 +2429,42 @@ class Method:
             argGroups = Token.splitArgs(argTokens)
             evaledArgs = [Expression.evaluate(self.me, self.args, g) for g in argGroups]
             
-            if self.me.this is None or not memory[self.me.class_name]['methods'][methodName]['static']:
-                raise RuntimeError(f"Cannot call non-static method \"{methodName}\" in static context")
-            if methodName not in memory[self.me.class_name]['methods']:
-                raise NameError(f"Method '{methodName}' not found in class '{self.me.class_name}'")
-            invokeMethod(
-                self.me.class_name,
-                methodName,
-                evaledArgs,
-                caller=self.me.class_name,
-                thisRef=self.me.this
-            )
-            self.tokPosition = closeIdx + 1
-            if self.tokPosition < len(self.lang) and self.lang[self.tokPosition].get()['type'] == 'SEMICOLON':
-                self.tokPosition += 1
-            return False
+            if self.me.class_name in memory:
+                if methodName in memory[self.me.class_name]['methods']:
+                    method_info = memory[self.me.class_name]['methods'][methodName]
+                    if method_info.get('static', False):
+                        invokeMethod(
+                            self.me.class_name,
+                            methodName,
+                            evaledArgs,
+                            caller=self.me.class_name,
+                            thisRef=None
+                        )
+                        self.tokPosition = closeIdx + 1
+                        if self.tokPosition < len(self.lang) and self.lang[self.tokPosition].get()['type'] == 'SEMICOLON':
+                            self.tokPosition += 1
+                        return False
+                    else:
+                        raise RuntimeError(f"Cannot call non-static method \"{methodName}\" in static context")
+            if self.me.class_name in interfaces:
+                if methodName in interfaces[self.me.class_name]['methods']:
+                    method_info = interfaces[self.me.class_name]['methods'][methodName]
+                    if method_info.get('static', False) or method_info.get('modifier') == 'static':
+                        invokeMethod(
+                            self.me.class_name,
+                            methodName,
+                            evaledArgs,
+                            caller=self.me.class_name,
+                            isInterfaceMethod=True
+                        )
+                        self.tokPosition = closeIdx + 1
+                        if self.tokPosition < len(self.lang) and self.lang[self.tokPosition].get()['type'] == 'SEMICOLON':
+                            self.tokPosition += 1
+                        return False
+                    else:
+                        raise RuntimeError(f"Cannot call non-static method \"{methodName}\" in static context")
+            
+            raise NameError(f"Method '{methodName}' not found in class '{self.me.class_name}'")
         elif tok_type == EvalTokens.TOKENS['return']:
             Return.ret(self.me, self.args, self.read(self.peek(), ';'))
             self.tokPosition += 1
@@ -2794,8 +2945,13 @@ class Method:
                 inner_tokens = expr_tokens[1:-1]
                 value = Expression.evaluate(self.me, self.me.getArgs(), inner_tokens)
                 endChar = '\n' if tok_type == 'NATIVE_PRINT_STMT' else ''
-
-                value = value.get() if type(value.get()).__module__ == 'builtins' else f'[INTERNAL] {type(value.get()).__name__}@{hex(id(value.get()))}'
+                if hasattr(value, 'get'):
+                    value = value.get() if type(value.get()).__module__ == 'builtins' else f'[INTERNAL] {type(value.get()).__name__}@{hex(id(value.get()))}'
+                else:
+                    if value is Void:
+                        value = f'[WARNING]: Tried to print a void return type from method {self.me.method_name}'
+                    else:
+                        value = value
 
                 print('[OUTPUT]: ' + str(value), end=endChar)
                 self.tokPosition += len(expr_tokens) + 1  
@@ -2815,7 +2971,8 @@ class Method:
             if a:
                 hasReturned = True
                 break
-        if not hasReturned and memory[self.className]['methods'][self.methodName]['returns'] is not Void:
+        search = memory if not self.isInterfaceMethod else interfaces
+        if not hasReturned and search[self.className]['methods'][self.methodName]['returns'] is not Void:
             raise RuntimeError(f'No return statement in method "{self.methodName}"')
 class Execution:
     def __init__(self, langParse: Intepreter):
@@ -2931,6 +3088,8 @@ class Execution:
                 elif 'is_active_else_def' in self.mode and 'else_body' in self.mode:
                     self.mode = []
                 elif self.currentClass: # End class
+                    for interface_name in memory[self.currentClass]['implements']:
+                        validateInterfaceImplementation(self.currentClass, interface_name)
                     self.currentClass = ''
                 elif self.currentInterface:
                     self.currentInterface = ''
@@ -2980,7 +3139,7 @@ class Execution:
                     
                     for token in self.lang[startRead+1:endClassDeclr+1]: # skip 'implements'
                         if token.get()['val'] in (',', '{'):
-                            if thisClassImplements[-1] not in interfaces:
+                            if not isInterface(thisClassImplements[-1]):
                                 raise NameError(f'Interface {thisClassImplements[-1]} does not exist')
                             continue
                         thisClassImplements.append(token.get()['val'])
@@ -2998,9 +3157,24 @@ class Execution:
                 self.clear()
             elif tok_type == EvalTokens.TOKENS['interface']:
                 name = self.next()
-                createInterface(name)
+                supers = []
+                if self.next(2) == 'extends':
+                    for token in self.lang[self.tokPosition+3:]:
+                        if token.get()['val'] == '\n':
+                            raise SyntaxError('Reached end of line, but expected more information')
+                        if token.get()['val'] in (',', '{'):
+                            if supers[-1] not in interfaces:
+                                raise NameError(f'Interface {supers[-1]} does not exist')
+                            if token.get()['val'] == ',':
+                                continue
+                            else:
+                                break
+                        supers.append(token.get()['val'])
+                createInterface(name, supers)
                 self.currentInterface = name
-                self.tokPosition += 2 # Skip to "{"
+                jumpBy = len(supers) + 1 if len(supers) > 0 else 0
+                self.tokPosition += 2 + jumpBy # Skip to "{"
+
                 continue
             elif tok_type == EvalTokens.TOKENS['final']: # Sets final
                 self.states['FINAL'] = True
@@ -3107,8 +3281,8 @@ class Execution:
                 )
                 self.clear(noClearMode=True, noClearInfo=True)
                 continue
-            elif tok_type == EvalTokens.TOKENS['('] and not is_constructor_call: # METHOD
-                if 'method_def' in self.mode:
+            elif tok_type == EvalTokens.TOKENS['('] and not is_constructor_call and self.before(2,'type') in (RETURN_TYPES + [EvalTokens.TOKENS['void']]): # METHOD
+                if 'method_def' in self.mode and not self.currentInterface:
                     # <modifier>, <static?>, <unsigned?>, <return_type>, <method_name> ( <...>
                     #       5         4          3             2              1        ^ WE ARE HERE  
                     self.mode = ['is_active_method_def', 'arg_def']
@@ -3155,7 +3329,7 @@ class Execution:
                         methodModifier = 'default'
                     else:
                         isValidModifier(methodModifier)
-                    setInterfaceMethod(self.currentInterface, self.before(), methodReturnType, methodModifier, args, checkedExecs)
+                    setInterfaceMethod(self.currentInterface, self.before(), methodReturnType, methodModifier, args, checkedExecs, False, self.states['STATIC']) # Assume it has a body
                     self.clear(noClearMode=True, noClearInfo=True)
                     self.mode = ['is_active_method_def', 'method_body']
                     self.info['thisMethodName'] = self.before()
@@ -3323,46 +3497,63 @@ class Execution:
         holder = self.currentClass if not self.currentInterface else self.currentInterface
         hasCheckdAllExeceptions(holder, self.info['thisMethodName'], not not self.currentInterface)
         self.tokPosition = closeIndex - 1
-def invokeMethod(className: str, methodName: str, args: list, caller: str, thisRef: 'ObjectReference | None' = None, startClass: str | None = None) -> Returnable:
-    if startClass is not None:
-        lookup_class = startClass
-    else:
-        lookup_class = className
-    found_method = None
-    
-    current = lookup_class
-    while current is not None:
-        if current in memory and methodName in memory[current]['methods']:
-            found_method = memory[current]['methods'][methodName]
-            break
-        if current in memory and 'super' in memory[current]:
-            current = memory[current]['super'].getClass()
+def invokeMethod(className: str, methodName: str, args: list, caller: str, thisRef: 'ObjectReference | None' = None, startClass: str | None = None, isInterfaceMethod: bool = False) -> Returnable:
+    if not isInterfaceMethod:
+        if startClass is not None:
+            lookup_class = startClass
         else:
-            current = None
-    
-    if found_method is None:
-        raise NameError(f"Method '{methodName}' not found in class hierarchy starting from '{lookup_class}'")
-    
-    if found_method.get('static', False):
-        if thisRef is not None:
-            print(f"[WARNING]: Static method {methodName} called with instance reference")
-        thisRef = None
-    else:
-        if thisRef is None:
-            if callStack and callStack[-1].this is not None:
-                thisRef = callStack[-1].this
+            lookup_class = className
+        found_method = None
+        
+        current = lookup_class
+        while current is not None:
+            if current in memory and methodName in memory[current]['methods']:
+                found_method = memory[current]['methods'][methodName]
+                break
+            if current in memory and 'super' in memory[current]:
+                current = memory[current]['super'].getClass()
             else:
-                raise RuntimeError(f"Cannot call instance method '{methodName}' without 'this' reference")
-    mInfo = memory[className]['methods'][methodName]
-    mArgTypes = list(mInfo['args'].values())
-    for mArgId in range(len(mArgTypes)):
-        isConsistentTypes(args[mArgId], mArgTypes[mArgId])
-        args[mArgId] = coerceValue(args[mArgId], mArgTypes[mArgId])
-    pushFrame(methodName, className, thisRef or newObject(className), args)
+                current = None
+        
+        if found_method is None:
+            raise NameError(f"Method '{methodName}' not found in class hierarchy starting from '{lookup_class}'")
+        
+        if found_method.get('static', False):
+            if thisRef is not None:
+                print(f"[WARNING]: Static method {methodName} called with instance reference")
+            thisRef = None
+        else:
+            if thisRef is None:
+                if callStack and callStack[-1].this is not None:
+                    thisRef = callStack[-1].this
+                else:
+                    raise RuntimeError(f"Cannot call instance method '{methodName}' without 'this' reference")
+        mInfo = memory[className]['methods'][methodName]
+        mArgTypes = list(mInfo['args'].values())
+        for mArgId in range(len(mArgTypes)):
+            isConsistentTypes(args[mArgId], mArgTypes[mArgId])
+            args[mArgId] = coerceValue(args[mArgId], mArgTypes[mArgId])
+        pushFrame(methodName, className, thisRef or newObject(className), args)
 
-    mModifier = mInfo['modifier']
-    thisScope = perspectiveOfClass(caller, className)
-    isAllowedAtThisScope(mModifier, thisScope)
+        mModifier = mInfo['modifier']
+        thisScope = perspectiveOfClass(caller, className)
+        isAllowedAtThisScope(mModifier, thisScope)
+    else:
+        if not isInterface(className):
+            raise NameError(f"Interface '{className}' is not defined")
+        if methodName not in interfaces[className]['methods']:
+            raise NameError(f"Method '{methodName}' not found in interface '{className}'")
+        mInfo = interfaces[className]['methods'][methodName]
+        
+        if not mInfo.get('static', False):
+            raise RuntimeError(f"Cannot call non-static method '{methodName}' from interface '{className}' in static context")
+        
+        mArgTypes = list(mInfo.get('args', {}).values())
+        for mArgId in range(len(mArgTypes)):
+            isConsistentTypes(args[mArgId], mArgTypes[mArgId])
+            args[mArgId] = coerceValue(args[mArgId], mArgTypes[mArgId])
+        
+        pushFrame(methodName, className, None, args)
     try:
         m = Method()
         m.parse()
