@@ -1,9 +1,11 @@
+# mypy: ignore-errors
 from typing import Any#, Optional
 import operator as pyop
 from pathlib import Path
 import struct
 import os
 import traceback
+import time
 
 staticVariables: dict[str, dict] = {}
 staticMethods: dict[str, dict] = {}
@@ -164,17 +166,16 @@ class ClassType(Returnable):
     def __repr__(self):
         return f"ClassType({self.className})"
 
-def isAllowedAtThisScope(modifier: str, thisScope: str) -> bool: 
+def isAllowedAtThisScope(modifier: str, thisScope: str, isInterface: bool = False) -> bool: 
     isValidModifier(modifier)
+    if isInterface:
+        return True
     if thisScope == "this":
         return True
     if modifier == "public":
         return True
     if modifier == "protected" and thisScope == "subclass":
         return True
-    # 'private' and 'default' (no package system exists in this language, so
-    # 'default'/package-private collapses to "this class only", same as 'private')
-    # are only accessible from thisScope == "this", which was already handled above.
     raise PermissionError('Attempted to access a field or method without sufficient permission')
 def isConsistentTypes(thisType: object, otherType: object) -> bool:
     if isinstance(thisType, ClassType) or thisType is ClassType or thisType is ClassReference:
@@ -204,7 +205,7 @@ def isConsistentTypes(thisType: object, otherType: object) -> bool:
         raise Exception(f'Type {otherType.__name__} does not support type {thisType.__name__}')
     
     raise Exception(f'Type {otherType.__name__} does not support type {thisType.__name__}')
-def hasCheckdAllExeceptions(ownerName: str, thisMethodName: str):
+def hasCheckdAllExeceptions(ownerName: str, thisMethodName: str, ownerAsInterface: bool = False):
     """
     Static (parse-time) check: for every call inside <thisMethodName>'s body to another
     method that declares exceptions in its own 'throws' clause, verify that this method
@@ -225,8 +226,12 @@ def hasCheckdAllExeceptions(ownerName: str, thisMethodName: str):
     defined later in the file (forward references) are not tracked and are silently
     skipped rather than raising a false positive.
     """
-    ownerThrows = memory[ownerName]['methods'][thisMethodName].get('throws', [])
-    methodInfo = memory[ownerName]['methods'][thisMethodName]
+    if not ownerAsInterface:
+        source = memory
+    else:
+        source = interfaces
+    ownerThrows = source[ownerName]['methods'][thisMethodName].get('throws', [])
+    methodInfo = source[ownerName]['methods'][thisMethodName]
     body = methodInfo.get('body')
     if not body:
         return
@@ -290,14 +295,12 @@ def hasCheckdAllExeceptions(ownerName: str, thisMethodName: str):
                 return True
         return False
 
-    # Map declared parameter names to class names, for resolving paramName.method() calls
     paramClassMap = {}
     for argName, argType in methodInfo.get('args', {}).items():
         if isinstance(argType, ClassReference):
             paramClassMap[argName] = argType.getClass()
 
     def resolveCall(idx):
-        """Best-effort resolution of a call starting at tokens[idx]. Returns (className, methodName) or (None, None)."""
         t0 = tokens[idx].get()
         if t0['type'] == 'IDENTIFIER' and idx + 1 < len(tokens) and tokens[idx + 1].get()['type'] == 'LPAREN':
             return ownerName, t0['val']
@@ -333,7 +336,7 @@ def hasCheckdAllExeceptions(ownerName: str, thisMethodName: str):
             )
 def isValidModifier(modifier: str):
     if not (modifier == 'private' or modifier == 'public' or modifier == 'protected' or modifier == 'default'):
-        raise Exception(f'The modifier provided was not either "private" or "public", was "{modifier}"')
+        raise TypeError(f'The modifier provided was not either "private" or "public", was "{modifier}"')
 def isValidReturnType(selftype: object):
     if isinstance(selftype, ClassType) or isinstance(selftype, ObjectReference):
         return
@@ -342,7 +345,7 @@ def isValidReturnType(selftype: object):
 def isChangeable(data: dict):
     if data['final']:
         raise Exception(f'This variable "{data['name']}" is final, and therefore cannot be modified')
-def createClass(className: str, classModifier: str, superClass: ClassReference = ClassReference('Object')):
+def createClass(className: str, classModifier: str, superClass: ClassReference = ClassReference('Object'), implements: list[str] = []):
     isValidModifier(classModifier)
     if className in memory:
         raise NameError(f"Class '{className}' is already defined")
@@ -361,6 +364,7 @@ def createClass(className: str, classModifier: str, superClass: ClassReference =
     memory[className] = {
         'name': className,
         'super': superClass,
+        'implements': implements,
         'modifier': classModifier,
         'methods': inherited,
         'fields': inherited_fields
@@ -410,10 +414,9 @@ def setInterfaceField(interfaceName: str, fieldName: str, fieldType: object, ini
         converted_value = convertValue(initialValue, fieldType)
     else:
         converted_value = default_value_for_type(fieldType)
-    
+
     if interfaceName not in staticVariables:
         staticVariables[interfaceName] = {}
-    
     staticVariables[interfaceName][fieldName] = {
         'class': interfaceName,
         'name': fieldName,
@@ -421,7 +424,19 @@ def setInterfaceField(interfaceName: str, fieldName: str, fieldType: object, ini
         'type': fieldType,
         'value': converted_value,
         'final': True,
-        'isInterface': True
+        'isInterface': True # Special tag for interface fields
+    }
+def setInterfaceMethod(interfaceName: str, methodName: str, methodReturnType: object, methodModifier: str, methodArgs: dict = {}, throws: list = []):
+    isValidReturnType(methodReturnType)
+    isValidModifier(methodModifier)
+    interfaceInfo = interfaces.get(interfaceName, {})
+    print(f'[WARNING]: {methodName} is presumed to be not abstract and requires a method body in the current release.')
+    interfaceInfo['methods'][methodName] = {
+        'name': methodName,
+        'modifier': methodModifier,
+        'returns': methodReturnType,
+        'args': methodArgs,
+        'throws': throws
     }
 
 def default_value_for_type(typ: object) -> object:
@@ -446,7 +461,7 @@ def default_value_for_type(typ: object) -> object:
     return Null()
 def setField(className: ClassReference, fieldName: str, fieldModifier: str, fieldType: object, initialValue: object = Null(), isStatic: bool = False, isFinal: bool = False):
     if isinstance(initialValue, Null):
-        initialValue = default_value_for_type(initialValue)
+        initialValue = default_value_for_type(fieldType)
     isValidModifier(fieldModifier)
     thisName = className.getClass()
     classInfo = memory[thisName]
@@ -730,9 +745,9 @@ class EvalTokens():
         "static": "STATIC",
         "unsigned": "UNSIGNED",
         "class": "CLASS",
-        #"interface": "INTERFACE",
+        "interface": "INTERFACE",
         "extends": "EXTENDS",
-        #"implements": "IMPLEMENTS",
+        "implements": "IMPLEMENTS",
         "new": "NEW",
         "return": "RETURN",
         "void": "VOID",
@@ -1129,7 +1144,7 @@ class Intepreter():
 
 ACCESS_MODIFIERS = [EvalTokens.TOKENS['public'], EvalTokens.TOKENS['private'], EvalTokens.TOKENS['protected'], EvalTokens.TOKENS['default']]
 RETURN_TYPES = [EvalTokens.TOKENS['byte'], EvalTokens.TOKENS['short'], EvalTokens.TOKENS['int'],
-EvalTokens.TOKENS['long'], EvalTokens.TOKENS['char'], EvalTokens.TOKENS['String'], EvalTokens.TOKENS['void'], EvalTokens.TOKENS['boolean'], EvalTokens.TOKENS['float'], EvalTokens.TOKENS['double']]
+EvalTokens.TOKENS['long'], EvalTokens.TOKENS['char'], EvalTokens.TOKENS['String'], EvalTokens.TOKENS['boolean'], EvalTokens.TOKENS['float'], EvalTokens.TOKENS['double']]
 OPERATORS = [EvalTokens.TOKENS['+'], EvalTokens.TOKENS['-'], EvalTokens.TOKENS['*'], EvalTokens.TOKENS['/'], EvalTokens.TOKENS['%']]
 BOOL_OPERATORS = [EvalTokens.SINGLE_CHAR_OP['>'], EvalTokens.SINGLE_CHAR_OP['<'], EvalTokens.TWO_CHAR_OP['&&'], EvalTokens.TWO_CHAR_OP['||'], EvalTokens.TWO_CHAR_OP['>='],
 EvalTokens.TWO_CHAR_OP['<='], EvalTokens.SINGLE_CHAR_OP['!'], EvalTokens.TWO_CHAR_OP['=='], EvalTokens.TWO_CHAR_OP['!=']]
@@ -1170,9 +1185,9 @@ def parseTokenAsType(token: str, acceptVoid: bool = False, isUnsigned: bool = Fa
                 return ClassType
             except Exception:
                 raise ValueError(f"Unknown type token: '{token}'")
-def prettyMemoryPrint():
+def prettyPrint(this: dict):
     import json
-    print(json.dumps(memory, indent=4,default=str))
+    print(json.dumps(this, indent=4,default=str))
 def getArgValById(args: list, nameOfArg: str, methodName: str, className: str):
     # Returns argument val based on the argument id (the name of the argument)
     methodArgs: dict = {}
@@ -1316,62 +1331,101 @@ def resolveDotChain(me: 'StackFrame | None', methodArgs: 'list | None', tokens: 
         current = resolveValue(me, methodArgs, leftToken)
 
     j = startIdx + 1
+    # Initialize className for the current object
+    if isinstance(current, str):
+        className = current
+    elif isinstance(current, ObjectReference):
+        className = current.getClass()
+    else:
+        className = None
+
     while j < len(tokens) and tokens[j].get()['type'] == 'DOT':
         if j + 1 >= len(tokens) or tokens[j + 1].get()['type'] != 'IDENTIFIER':
             raise SyntaxError("Expected identifier after '.'")
         memberName = tokens[j + 1].get()['val']
         isCall = j + 2 < len(tokens) and tokens[j + 2].get()['type'] == 'LPAREN'
 
-        if isinstance(current, str):
-            className = current
-        elif isinstance(current, ObjectReference):
-            className = current.getClass()
-        elif isinstance(current, PrimitiveArray):
+        if className in memory and memberName in memory[className]['methods']:
+            method_info = memory[className]['methods'][memberName]
+            if not method_info.get('static', False):
+                raise RuntimeError(f"Method '{memberName}' in class '{className}' is not static")
+        callerClass = me.class_name if me is not None else (className if className else '')
+
+        is_super_access = (leftName == 'super' and j == startIdx + 1)
+
+        if isinstance(current, str) and not isCall:
+            if memberName in staticVariables.get(current, {}):
+                field_data = staticVariables[current][memberName]
+                thisScope = perspectiveOfClass(callerClass, current)
+                isAllowedAtThisScope(field_data['modifier'], thisScope, field_data.get('isInterface', False))
+                current = field_data['value']
+                j += 2
+                continue
+            else:
+                raise RuntimeError(f"Static field '{memberName}' not found in class '{current}'")
+        elif isinstance(current, PrimitiveArray): #arr.length
             if memberName == 'length':
                 current = Int(current.size)
                 j += 2
                 continue
-        else:
-            raise RuntimeError(f"Cannot access '.{memberName}' on non-object value: {current!r}")
-        
-        # Determine the caller class for permission checks
-        callerClass = me.class_name if me is not None else className
-
-        # Check if we're resolving a super field
-        is_super_access = (leftName == 'super' and j == startIdx + 1)
-
-        if isCall:
-            openParenIdx = j + 2
-            closeIdx = matchingParen(tokens, openParenIdx)
-            argGroups = Token.splitArgs(tokens[openParenIdx + 1 : closeIdx])
-            evaledArgs = [Expression.evaluate(me, methodArgs, g) for g in argGroups]
-            thisRef = current if isinstance(current, ObjectReference) else None
-            
-            if is_super_access:
-                start_class = superclass_name
             else:
-                start_class = None
+                raise RuntimeError(f"Primitive array has no field '{memberName}'")
+        elif isinstance(current, ObjectReference):
+            className = current.getClass()
             
-            current = invokeMethod(className, memberName, evaledArgs, caller=callerClass, thisRef=thisRef, startClass=start_class)
-            j = closeIdx + 1
-        else:
-            if isinstance(current, str):
-                if memberName in staticVariables.get(className, {}):
-                    thisScope = perspectiveOfClass(callerClass, className)
-                    isAllowedAtThisScope(staticVariables[className][memberName]['modifier'], thisScope)
-                    current = staticVariables[className][memberName]['value']
+            if isCall:
+                openParenIdx = j + 2
+                closeIdx = matchingParen(tokens, openParenIdx)
+                argGroups = Token.splitArgs(tokens[openParenIdx + 1 : closeIdx])
+                evaledArgs = [Expression.evaluate(me, methodArgs, g) for g in argGroups]
+                thisRef = current if isinstance(current, ObjectReference) else None
+                
+                if is_super_access:
+                    start_class = superclass_name
                 else:
-                    raise RuntimeError(f"Static field '{memberName}' not found in class '{className}'")
+                    start_class = None
+                
+                current = invokeMethod(className, memberName, evaledArgs, caller=callerClass, thisRef=thisRef, startClass=start_class)
+                j = closeIdx + 1
             else:
+                # Field access on object
                 if is_super_access:
                     field_class = superclass_name
                 else:
                     field_class = className
                 
                 thisScope = perspectiveOfClass(callerClass, field_class)
-                isAllowedAtThisScope(memory[field_class]['fields'][memberName]['modifier'], thisScope)
-                current = current.get().fields.get(memberName, Null())
-            j += 2
+                # Check if field exists
+                if field_class in memory and memberName in memory[field_class]['fields']:
+                    isAllowedAtThisScope(memory[field_class]['fields'][memberName]['modifier'], thisScope)
+                    current = current.get().fields.get(memberName, Null())
+                else:
+                    raise RuntimeError(f"Field '{memberName}' not found in class '{field_class}'")
+                j += 2
+                continue
+        
+        # Main.add()
+        elif isinstance(current, str) and isCall:
+            className = current
+            openParenIdx = j + 2
+            closeIdx = matchingParen(tokens, openParenIdx)
+            argGroups = Token.splitArgs(tokens[openParenIdx + 1 : closeIdx])
+            evaledArgs = [Expression.evaluate(me, methodArgs, g) for g in argGroups]
+            
+            if className in memory and memberName in memory[className]['methods']:
+                method_info = memory[className]['methods'][memberName]
+                if not method_info.get('static', False):
+                    raise RuntimeError(f"Method '{memberName}' in class '{className}' is not static")
+                
+                thisScope = perspectiveOfClass(callerClass, className)
+                isAllowedAtThisScope(method_info['modifier'], thisScope)
+                current = invokeMethod(className, memberName, evaledArgs, caller=callerClass, thisRef=None)
+                j = closeIdx + 1
+            else:
+                raise RuntimeError(f"Static method '{memberName}' not found in class '{className}'")
+        
+        else:
+            raise RuntimeError(f"Cannot access '.{memberName}' on value: {current!r}")
 
     return current, j
 def collapseTokenSlice(me: StackFrame | None, methodArgs: list | None, tokens: TokenSlice) -> TokenSlice:
@@ -1473,19 +1527,17 @@ def collapseTokenSlice(me: StackFrame | None, methodArgs: list | None, tokens: T
             if me is not None:
                 method_info = memory.get(me.class_name, {}).get('methods', {}).get(methodName)
                 if method_info and method_info.get('static', False):
-                    i += 2
-                    argsList = []
-                    thisExpr = []
-                    for tok in tokens[i:]:
-                        if tok.get()['val'] in (',', ')'):
-                            argsList.append(Expression.evaluate(me, methodArgs, thisExpr))
-                            thisExpr = []
-                            i += 1
-                            continue
-                        thisExpr.append(tok)
-                        i += 1
-                    result = invokeMethod(me.class_name, methodName, argsList, caller=me.class_name)
+                    open_paren = i + 1
+                    close_paren = matchingParen(tokens, open_paren)
+                    
+                    # Extract arguments between the parentheses
+                    arg_tokens = tokens[open_paren + 1 : close_paren]
+                    arg_groups = Token.splitArgs(arg_tokens)
+                    evaled_args = [Expression.evaluate(me, methodArgs, group) for group in arg_groups]
+                    
+                    result = invokeMethod(me.class_name, methodName, evaled_args, caller=me.class_name)
                     out.append(Token.wrap(result))
+                    i = close_paren + 1
                     continue
             raise RuntimeError(f'Cannot invoke a non-static method {methodName} in a static context')
         elif t == 'IDENTIFIER':
@@ -1874,7 +1926,7 @@ class Method:
         return self.lang[self.tokPosition + by]
     def parse(self):
         if not self.methodBody:
-            print(f'[WARNING] Method {self.methodName} of class {self.className} has no body to execute')
+            print(f'[WARNING]: Method {self.methodName} of class {self.className} has no body to execute')
         self.methodParse = Intepreter(self.methodBody)
         self.methodParse.parse()
         self.lang = self.methodParse.get() 
@@ -2067,6 +2119,9 @@ class Method:
                     # Static
                     if member_name not in memory[obj_name]['methods']:
                         raise NameError(f"Method '{member_name}' not found in class '{obj_name}'")
+                
+                    if member_name not in staticMethods.get(obj_name, {}):
+                        raise RuntimeError(f"Cannot call non-static method \"{member_name}\" in static context")
                     invokeMethod(
                         obj_name,
                         member_name,
@@ -2244,8 +2299,8 @@ class Method:
             argGroups = Token.splitArgs(argTokens)
             evaledArgs = [Expression.evaluate(self.me, self.args, g) for g in argGroups]
             
-            if self.me.this is None:
-                raise RuntimeError("Cannot call instance method in static context")
+            if self.me.this is None or not memory[self.me.class_name]['methods'][methodName]['static']:
+                raise RuntimeError(f"Cannot call non-static method \"{methodName}\" in static context")
             if methodName not in memory[self.me.class_name]['methods']:
                 raise NameError(f"Method '{methodName}' not found in class '{self.me.class_name}'")
             invokeMethod(
@@ -2733,16 +2788,18 @@ class Method:
             
             return tok_type.lower()  # 'break' or 'continue'
         elif tok_type == 'NATIVE_PRINT_STMT' or tok_type == 'NATIVE_PRINT_STMT_nline':
-            # Get everything between parentheses, respecting nesting
             if self.peek().get()['type'] == 'LPAREN':
                 expr_tokens = self.readUntilMatching(self.peek(), '(', ')')
-                # The tokens include the outer parentheses, so we need to strip them
-                inner_tokens = expr_tokens[1:-1]  # Remove '(' and ')'
+                
+                inner_tokens = expr_tokens[1:-1]
                 value = Expression.evaluate(self.me, self.me.getArgs(), inner_tokens)
                 endChar = '\n' if tok_type == 'NATIVE_PRINT_STMT' else ''
-                print(value.get(), end=endChar)
-                self.tokPosition += len(expr_tokens) + 1  # Skip the expression + the ')' we already consumed
-                # Skip semicolon if present
+
+                value = value.get() if type(value.get()).__module__ == 'builtins' else f'[INTERNAL] {type(value.get()).__name__}@{hex(id(value.get()))}'
+
+                print('[OUTPUT]: ' + str(value), end=endChar)
+                self.tokPosition += len(expr_tokens) + 1  
+
                 if self.tokPosition < len(self.lang) and self.lang[self.tokPosition].get()['type'] == 'SEMICOLON':
                     self.tokPosition += 1
             
@@ -2771,6 +2828,7 @@ class Execution:
         # self.mode: This is the possible mode. For example, if the parser sees a Token(RPAREN), it may be a:
         # "arg_def", "cond_def", or "arith_paren". Once more context is provided, the list should eventually narrow down to one element (usually just cleared)\
 
+        self.currentInterface: str = ''
         self.states: dict[str, bool] = {
             'FINAL': False,
             'STATIC': False,
@@ -2787,7 +2845,8 @@ class Execution:
         memory = {'Object': {'name': 'Object'}}
         heap.clear()
         staticVariables.clear()
-        staticVariables.clear()
+        staticMethods.clear()
+        interfaces.clear()
     def before(self, by: int = 1, getType: str = 'val'):
         return self.lang[self.tokPosition - by].get()[getType]
     def next(self, by: int = 1, getType: str = 'val'):
@@ -2856,7 +2915,7 @@ class Execution:
                 elif 'is_active_else_def' in self.mode:
                     self.mode = ['is_active_else_def', 'else_body']
                     #self.handleElseCall()
-                elif self.currentClass: # Classes do not contain "code", therefore just skip
+                elif self.currentClass or self.currentInterface: # Classes do not contain "code", therefore just skip
                     pass
                 else:
                     raise SyntaxError(f'Unexpected open brace at pos {token.getPos()}')
@@ -2873,7 +2932,8 @@ class Execution:
                     self.mode = []
                 elif self.currentClass: # End class
                     self.currentClass = ''
-                    self.info['isInClass'] = False
+                elif self.currentInterface:
+                    self.currentInterface = ''
                 else:
                     raise SyntaxError(f'Unexpected closing brace at pos {token.getPos()["pos"]}')
             elif tok_type == EvalTokens.TOKENS['import']:
@@ -2891,11 +2951,13 @@ class Execution:
                 except FileNotFoundError:
                     raise FileNotFoundError(f'The specified package, "{''.join(directory)}", does not exist in the packages folder')
                 print(f'[INFO]: Loading package {''.join(directory)}...')
+                start = time.time()
                 packageExecutor = Execution(Intepreter(thisPackageContent))
                 packageExecutor.executeTokens()
+                end = time.time()
+                print(f'[INFO]: Successfully loaded package {''.join(directory)}')
+                print(f'[INFO]: Package loaded in {(round(end-start,1))* 10 **3}ms')
             elif tok_type == EvalTokens.TOKENS['class']:
-                if self.info.get('isInClass', False):
-                    raise SyntaxError('Cannot define a class inside another class')
                 self.mode = []
                 modifier = ''
                 if self.tokPosition == 1:
@@ -2908,18 +2970,38 @@ class Execution:
                 
                 class_name = self.next()
                 self.tokPosition += 1
-                
-                if self.next(by=1) != 'extends':  # Check the next token after class name
-                    createClass(class_name, modifier)
+
+                endClassDeclr = self.tokPosition + [a.get()['val'] for a in self.lang[self.tokPosition:]].index('{')
+                thisClassImplements = []
+                if self.next(by=3) == 'implements' or self.next() == 'implements': 
+                    # Either class A extends B implements C or class A implements B
+                    readByOffset = 3 if self.next(3) == 'implements' else 1
+                    startRead = self.tokPosition + readByOffset
+                    
+                    for token in self.lang[startRead+1:endClassDeclr+1]: # skip 'implements'
+                        if token.get()['val'] in (',', '{'):
+                            if thisClassImplements[-1] not in interfaces:
+                                raise NameError(f'Interface {thisClassImplements[-1]} does not exist')
+                            continue
+                        thisClassImplements.append(token.get()['val'])
+
+                if self.next() != 'extends':  # Check the next token after class name
+                    createClass(class_name, modifier, implements=thisClassImplements)
                 else:
                     if self.info.get('hasSuper', False):
                         raise NameError(f'Class {class_name} cannot have multiple parent classes')
                     self.tokPosition += 1  # skip 'extends'
                     super_name = self.next()  # get superclass name
-                    createClass(class_name, modifier, ClassReference(super_name))
+                    createClass(class_name, modifier, ClassReference(super_name), thisClassImplements)
+                self.tokPosition = endClassDeclr-1
                 self.currentClass = class_name
                 self.clear()
-                self.info['isInClass'] = True
+            elif tok_type == EvalTokens.TOKENS['interface']:
+                name = self.next()
+                createInterface(name)
+                self.currentInterface = name
+                self.tokPosition += 2 # Skip to "{"
+                continue
             elif tok_type == EvalTokens.TOKENS['final']: # Sets final
                 self.states['FINAL'] = True
                 self.info['readBy'] = self.info.get('readBy', 1) + 1# This makes the modifier keyword 2 spaces behind
@@ -2931,7 +3013,7 @@ class Execution:
                 self.info['readBy'] = self.info.get('readBy', 1) + 1
             elif tok_type in ACCESS_MODIFIERS: # Applies context: 'method_def', 'field_def'
                 self.mode.extend(['method_def', 'field_def'])
-            elif tok_type in RETURN_TYPES and 'field_def' in self.mode: # FIELD
+            elif tok_type in RETURN_TYPES and ('field_def' in self.mode or self.next(2) == '='): # FIELD
                 modifier = 'default'
                 i = self.tokPosition - 1
                 while i >= 0:
@@ -2943,16 +3025,17 @@ class Execution:
                         break
                     
                     i -= 1
+                isInterfaceField = len(self.currentInterface) > 0
                 if self.next(by=2) == '=': # Looks like: <modifier> int <id> = <value>;
                     self.mode = []
                     if tok_type == 'TRUE' or tok_type == 'FALSE' or tok_type == 'BOOLEAN_TYPE':
                         t_type = Bool
                     else:
                         t_type = parseTokenAsType(tok_type, isUnsigned=self.states['UNSIGNED'])
-                    self.handleFieldDefinition(t_type, modifier)
+                    self.handleFieldDefinition(t_type, modifier, interface=isInterfaceField)
                 elif self.next(by=2) == ';':
                     self.mode = []
-                    self.handleNullFieldDefinition(parseTokenAsType(tok_type, isUnsigned=self.states['UNSIGNED']), modifier)
+                    self.handleNullFieldDefinition(parseTokenAsType(tok_type, isUnsigned=self.states['UNSIGNED']), modifier, interface=isInterfaceField)
             elif tok_type == 'IDENTIFIER' and 'field_def' in self.mode:
                 #ClassName fieldName = ...; or ClassName fieldName;
                 if self.tokPosition >= 1:
@@ -3029,63 +3112,154 @@ class Execution:
                     # <modifier>, <static?>, <unsigned?>, <return_type>, <method_name> ( <...>
                     #       5         4          3             2              1        ^ WE ARE HERE  
                     self.mode = ['is_active_method_def', 'arg_def']
-                    args = argsList(self.handleArgumentDefinition(token))
+                    args = argsList(self.handleArgumentDefinition())
                     checkedExecs = self.handleThrowStmt(token, len(list(args.keys())))
                     del self.info['thisMethodArgs']
                     parseby = 1 if self.states['STATIC'] else 0
                     parseby += 1 if self.states['UNSIGNED'] else 0
                     methodReturnType = parseTokenAsType(self.before(by=2), True, self.states['UNSIGNED'])
+                    search_pos = self.tokPosition - 3
+                    methodModifier = 'default'
+                    while search_pos >= 0:
+                        t = self.lang[search_pos]
+                        if t.get()['type'] in ACCESS_MODIFIERS or t.get()['val'] in ['public', 'private', 'protected', 'default']:
+                            methodModifier = t.get()['val']
+                            break
+                        elif t.get()['type'] == 'NEWLINE' or t.get()['type'] == 'START_DECLARATION':
+                            break
+                        search_pos -= 1
+                    
+                    isValidModifier(methodModifier)
+
                     if methodReturnType is ClassType:
-                        self.handleMethodDefinition(self.before(), self.before(by=3+parseby), ClassType(self.before(by=2)), self.states['STATIC'], args, checkedExecs)
+                        self.handleMethodDefinition(self.before(), methodModifier, ClassType(self.before(by=2)), self.states['STATIC'], args, checkedExecs)
                     else:
-                        self.handleMethodDefinition(self.before(), self.before(by=3+parseby), methodReturnType, self.states['STATIC'], args, checkedExecs)
+                        self.handleMethodDefinition(self.before(), methodModifier, methodReturnType, self.states['STATIC'], args, checkedExecs)
                     self.info['thisMethodName'] = self.before()
                     if self.info.get('thisMethodName') == ENTRY_METHOD_NAME:
-                        if self.before(by=3+parseby) != 'public':
+                        if methodModifier != 'public':
                             raise Exception(f'The {ENTRY_METHOD_NAME} method must be public')
                         if self.before(by=2) != 'void':
                             raise Exception(f'The {ENTRY_METHOD_NAME} method must return void')
                         if len(args) > 1:
                             raise Exception(f'The {ENTRY_METHOD_NAME} method must not have more than 1 argument')
-                        ENTRY['entryClass'] = self.currentClass
+                    ENTRY['entryClass'] = self.currentClass
+                elif self.currentInterface:
+                    parseby = 1 if self.states['STATIC'] else 0
+                    parseby += 1 if self.states['UNSIGNED'] else 0
+                    args = argsList(self.handleArgumentDefinition())
+                    checkedExecs = self.handleThrowStmt(token, len(list(args.keys())))
+                    methodReturnType = parseTokenAsType(self.before(by=2), True, self.states['UNSIGNED'])
+                    methodModifier = self.before(by=3+parseby)
+                    if str(methodModifier).isspace():
+                        methodModifier = 'default'
+                    else:
+                        isValidModifier(methodModifier)
+                    setInterfaceMethod(self.currentInterface, self.before(), methodReturnType, methodModifier, args, checkedExecs)
+                    self.clear(noClearMode=True, noClearInfo=True)
+                    self.mode = ['is_active_method_def', 'method_body']
+                    self.info['thisMethodName'] = self.before()
             elif tok_type == EvalTokens.TOKENS[')']:
                 if self.info.get('parenStack', 0) == 0:
                     raise SyntaxError(f'Unexpected closing parenthesis at pos {token.getPos()["pos"]}')
                 self.info['parenStack'] -= 1
             self.tokPosition += 1
-    def handleFieldDefinition(self, type: object, modifier: str):
+    def handleFieldDefinition(self, _type: object, modifier: str, interface: bool):
         valueTokens = self.read(self.peek(3), ';')
         parsedValue = FieldAssignment.evaluate(valueTokens)
         # Convert
-        converted = convertValue(parsedValue, type)
-        setField(ClassReference(self.currentClass), self.next(), modifier, type, converted, isStatic=self.states['STATIC'], isFinal=self.states['FINAL'])
+        converted = convertValue(parsedValue, _type)
+        if not interface:
+            setField(ClassReference(self.currentClass), self.next(), modifier, _type, converted, isStatic=self.states['STATIC'], isFinal=self.states['FINAL'])
+        else:
+            setInterfaceField(self.currentInterface, self.next(), _type, converted)
         self.clear(noClearMode=True, noClearInfo=True)
-    def handleArgumentDefinition(self, currentToken: Token):
-        startArgRead = currentToken.getPos()['pos'] + 1
-        endArgRead = self.langParse.getSource()[startArgRead:].index(')') + startArgRead
-        argReader = self.langParse.getSource()[startArgRead:endArgRead]
+    def handleArgumentDefinition(self):
+        open_paren_idx = self.tokPosition 
+        close_paren_idx = matchingParen(self.lang, open_paren_idx)
+        arg_tokens = self.lang[open_paren_idx + 1 : close_paren_idx]
+        
         self.info['thisMethodArgs'] = {}
-        for arg in argReader.split(','):
-            arg = arg.strip() # strip
-            if not arg:
-                continue
-            parts = arg.split() # <type> | <name> Split by space
-            if len(parts) != 2:  # Expects two entries, type and name
-                raise SyntaxError(f"Invalid argument definition: '{arg}'")
-            arg_type_token, arg_name = parts
-            try:
-                isValidReturnType(parseTokenAsType(arg_type_token, isUnsigned=self.states['UNSIGNED']))
-                arg_type = parseTokenAsType(arg_type_token, isUnsigned=self.states['UNSIGNED'])
-            except ValueError:
-                if arg_type_token.split('[')[0] in RETURN_TYPE_STR or isClass(arg_type_token.split('[')[0]): # <type>, ]
-                    arrType = parseTokenAsType(arg_type_token.split('[')[0])
-                    arg_type = PrimitiveArrayWrapper(arrType)
-                elif isClass(arg_type_token):
-                    arg_type = ClassReference(arg_type_token) # If it is not a primitive type, then it must be a class reference
+        
+        if arg_tokens:
+            # Parse arguments from tokens
+            arg_parts = []
+            current_part = []
+            depth = 0
+            
+            for tok in arg_tokens:
+                val = tok.get()['val']
+                if val == '(':
+                    depth += 1
+                    current_part.append(val)
+                elif val == ')':
+                    depth -= 1
+                    current_part.append(val)
+                elif val == ',' and depth == 0:
+                    arg_parts.append(' '.join(current_part).strip())
+                    current_part = []
                 else:
-                    raise RuntimeError(f'Could not resolve the argument stream: {argReader}')
-            self.info['thisMethodArgs'][arg_name] = arg_type # Do not set into self.argumentStack
-
+                    current_part.append(val)
+            if current_part:
+                arg_parts.append(' '.join(current_part).strip())
+            
+            for arg in arg_parts:
+                if not arg:
+                    continue
+                
+                if '[' in arg and ']' in arg:
+                    type_part = arg.split('[')[0].strip()
+                    name_part = arg.split(']')[1].strip() if ']' in arg else ''
+                    
+                    if not name_part:
+                        parts = arg.split()
+                        if len(parts) >= 2:
+                            if '[' in parts[-2] and ']' in parts[-2]:
+                                type_part = parts[-2]
+                                name_part = parts[-1]
+                            elif '[' in parts[0] and ']' in parts[0]:
+                                type_part = parts[0]
+                                name_part = parts[1] if len(parts) > 1 else ''
+                    
+                    if name_part:
+                        base_type = type_part.split('[')[0].strip()
+                        try:
+                            if base_type in RETURN_TYPE_STR:
+                                arr_type = parseTokenAsType(base_type, isUnsigned=self.states['UNSIGNED'])
+                                arg_type = PrimitiveArrayWrapper(arr_type)
+                            elif isClass(base_type):
+                                arg_type = PrimitiveArrayWrapper(ClassType(base_type))
+                            else:
+                                raise RuntimeError(f'Could not resolve array type: {base_type}')
+                        except Exception:
+                            raise RuntimeError(f'Could not resolve array type: {base_type}')
+                        
+                        self.info['thisMethodArgs'][name_part] = arg_type
+                        continue
+                
+                parts = arg.split(' ')
+                if len(parts) != 2:
+                    raise SyntaxError(f"Invalid argument definition: '{arg}'")
+                
+                arg_type_token, arg_name = parts
+                
+                try:
+                    isValidReturnType(parseTokenAsType(arg_type_token, isUnsigned=self.states['UNSIGNED']))
+                    arg_type = parseTokenAsType(arg_type_token, isUnsigned=self.states['UNSIGNED'])
+                except ValueError:
+                    if '[' in arg_type_token and ']' in arg_type_token:
+                        base_type = arg_type_token.split('[')[0]
+                        if base_type in RETURN_TYPE_STR or isClass(base_type):
+                            arr_type = parseTokenAsType(base_type, isUnsigned=self.states['UNSIGNED'])
+                            arg_type = PrimitiveArrayWrapper(arr_type)
+                        else:
+                            raise RuntimeError(f'Could not resolve array type: {arg_type_token}')
+                    elif isClass(arg_type_token):
+                        arg_type = ClassReference(arg_type_token)
+                    else:
+                        raise RuntimeError(f'Could not resolve the argument stream: {arg}')
+                
+                self.info['thisMethodArgs'][arg_name] = arg_type
         return self.info['thisMethodArgs']
     def handleThrowStmt(self, currentToken: Token, argSize: int): # <method_name> (<args>) throws? <exceptions...>
         argSize = len(self.read(currentToken, ')')) + 1
@@ -3106,8 +3280,8 @@ class Execution:
                 raise NameError(f'Invalid exception "{e}"')
             parsed.append(thisExec)
         return parsed
-    def handleNullFieldDefinition(self, _type: object, modifier: str):
-        setField(ClassReference(self.currentClass), self.next(), modifier, _type, default_value_for_type(_type), isStatic=self.states['STATIC'], isFinal=self.states['FINAL'])
+    def handleNullFieldDefinition(self, _type: object, modifier: str, interface: bool = False):
+        setField(ClassReference(self.currentClass), self.next(), modifier, _type, default_value_for_type(_type), isStatic=self.states['STATIC'], isFinal=self.states['FINAL'], interface=interface)
     def handleMethodDefinition(self, methodName: str, methodModifier: str, methodReturnType: object, isStatic: bool, methodArgs: dict, throws: list = []):
         createMethod(ClassReference(self.currentClass), methodName, methodModifier, methodReturnType, isStatic, argsList(methodArgs), throws)
         self.clear(noClearMode=True, noClearInfo=True)
@@ -3142,8 +3316,12 @@ class Execution:
             raise SyntaxError(f"Unterminated method body starting at {currentToken.getPos()}")
         endArgRead = self.lang[closeIndex].getPos()['pos']
         methodBody = self.langParse.getSource()[startArgRead:endArgRead]
-        memory[self.currentClass]['methods'][self.info['thisMethodName']]['body'] = methodBody.strip()
-        hasCheckdAllExeceptions(self.currentClass, self.info['thisMethodName'])
+        if not self.currentInterface:
+            memory[self.currentClass]['methods'][self.info['thisMethodName']]['body'] = methodBody.strip()
+        else:
+            interfaces[self.currentInterface]['methods'][self.info['thisMethodName']]['body'] = methodBody.strip()
+        holder = self.currentClass if not self.currentInterface else self.currentInterface
+        hasCheckdAllExeceptions(holder, self.info['thisMethodName'], not not self.currentInterface)
         self.tokPosition = closeIndex - 1
 def invokeMethod(className: str, methodName: str, args: list, caller: str, thisRef: 'ObjectReference | None' = None, startClass: str | None = None) -> Returnable:
     if startClass is not None:
@@ -3151,13 +3329,11 @@ def invokeMethod(className: str, methodName: str, args: list, caller: str, thisR
     else:
         lookup_class = className
     found_method = None
-    found_class = None
     
     current = lookup_class
     while current is not None:
         if current in memory and methodName in memory[current]['methods']:
             found_method = memory[current]['methods'][methodName]
-            found_class = current
             break
         if current in memory and 'super' in memory[current]:
             current = memory[current]['super'].getClass()
@@ -3169,7 +3345,7 @@ def invokeMethod(className: str, methodName: str, args: list, caller: str, thisR
     
     if found_method.get('static', False):
         if thisRef is not None:
-            print(f"[WARNING] Static method {methodName} called with instance reference")
+            print(f"[WARNING]: Static method {methodName} called with instance reference")
         thisRef = None
     else:
         if thisRef is None:
@@ -3210,9 +3386,11 @@ while choice == 'Retry':
     os.system('cls')
     if oldContent == content:
         print(f'[WARNING]: File reloading did not detect any changes in file. Did you save the file {fileName}?')
-    print('OUTPUT:\n')
     try:
+        userArgs = input('[ENTER ARGS]: ')
+        os.system('cls')
         Exec = Execution(Intepreter(content))
+        print('CONSOLE OUTPUT:\n')
         Exec.executeTokens()
         try:
             if ENTRY['entryClass'] not in memory or ENTRY_METHOD_NAME not in memory[ENTRY['entryClass']]['methods']:
@@ -3220,7 +3398,6 @@ while choice == 'Retry':
             entryArgTypes = list(memory[ENTRY['entryClass']]['methods'][ENTRY_METHOD_NAME]['args'].values())
             callArgs = []
             if entryArgTypes:
-                userArgs = input('[ENTER ARGS]: ')
                 rawArgs = userArgs.split()
                 argType = entryArgTypes[0]
                 if isinstance(argType, PrimitiveArrayWrapper):
@@ -3229,17 +3406,18 @@ while choice == 'Retry':
                     callArgs = [newPrimitiveArray(elementType, len(elements), elements)]
                 else:
                     callArgs = [convertValue(String(' '.join(rawArgs)), argType)]
+            start = time.time()
             invokeMethod(ENTRY['entryClass'], ENTRY_METHOD_NAME, callArgs, caller=ENTRY['entryClass'])
+            end = time.time()
+            print(f'[INFO]: Program exited, with duration of {round(end-start, 4)}s')
         except NameError:
             raise NameError(f'Could not resolve the entry method "{ENTRY_METHOD_NAME}". Please define it properly')
     except Exception as e:
         for line in traceback.format_exception(e)[1:-1]:
             print(line.strip())
         print(f'\n[ERROR]: {traceback.format_exception(e)[-1]}')
-
     choice = 'Retry' if not input('\n[ENTER]: Reload file [OTHER+ENTER]: Exit console') else ''
     if choice == 'Retry':
         Exec.reset()
-    
     os.system('cls')
     oldContent = content
