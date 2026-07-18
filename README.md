@@ -36,14 +36,12 @@ To create a file that is readable by PJDK, create a simple text document in the 
 All files must have a valid entry point, like a standard Java program:
 ```
 public class Main{
-  public static void main(){
+  public static void main(String[] args){
 
   }
 }
 ```
 Note: The entry class name is optional, and does not have to be the name of the file it is in (since this is not a real Java environment)
-
-(Currently, there is no support for command line arguments (`String[] args`), so do not create that argument) (Coming Release 1.5.x potentially)
 
 If you have difficulty creating the entry point, download a pre-made one from source/PJDK_Template.txt
 
