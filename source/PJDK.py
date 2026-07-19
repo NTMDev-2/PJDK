@@ -36,18 +36,12 @@ def toSigned(value: int, bits: int) -> int:
     if value >= (1 << (bits - 1)):
         value -= (1 << bits)
     return value
-def toUnsigned(value: int, bits: int) -> int:
-    if isinstance(value, Int):
-        value = value.get()
-    return value & ((1 << bits) - 1)
 
 class _IntegerBase(Numeric, Returnable):
     bits: int = 32
     signed: bool = True
     def __init__(self, value: int = 0):
-        self.value = toSigned(value, self.bits) if self.signed else toUnsigned(value, self.bits)
-    def to_bytes(self):
-        return toUnsigned(self.value, self.bits).to_bytes(self.bits // 8, 'big')
+        self.value = toSigned(value, self.bits)
     def __repr__(self):
         return f"{type(self).__name__}({self.value})"
     def get(self):
@@ -70,27 +64,6 @@ class Int(_IntegerBase):
         return cls.bits
 class Long(_IntegerBase):
     bits = 64
-    @classmethod
-    def get_bits(cls):
-        return cls.bits
-
-class UnsignedByte(_IntegerBase):
-    bits = 8;  signed = False
-    @classmethod
-    def get_bits(cls):
-        return cls.bits
-class UnsignedShort(_IntegerBase):
-    bits = 16; signed = False
-    @classmethod
-    def get_bits(cls):
-        return cls.bits
-class UnsignedInt(_IntegerBase):
-    bits = 32; signed = False
-    @classmethod
-    def get_bits(cls):
-        return cls.bits
-class UnsignedLong(_IntegerBase):
-    bits = 64; signed = False
     @classmethod
     def get_bits(cls):
         return cls.bits
@@ -210,8 +183,6 @@ def isConsistentTypes(thisType: object, otherType: object) -> bool:
     try:
         if issubclass(thisType, otherType) or issubclass(otherType, thisType):
             return True
-        # Same-bit-width integer types are interchangeable regardless of signedness
-        # (e.g. Byte <-> UnsignedByte, Short <-> UnsignedShort, Int <-> UnsignedInt, Long <-> UnsignedLong)
         if issubclass(thisType, _IntegerBase) and issubclass(otherType, _IntegerBase) and thisType.bits == otherType.bits:
             return True
     except TypeError:
@@ -484,13 +455,13 @@ def setInterfaceMethod(interfaceName: str, methodName: str, methodReturnType: ob
     }
 
 def default_value_for_type(typ: object) -> object:
-    if typ is Byte or typ is UnsignedByte:
+    if typ is Byte:
         return Byte(0)
-    if typ is Short or typ is UnsignedShort:
+    if typ is Short:
         return Short(0)
-    if typ is Int or typ is UnsignedInt:
+    if typ is Int:
         return Int(0)
-    if typ is Long or typ is UnsignedLong:
+    if typ is Long:
         return Long(0)
     if typ is Float:
         return Float(0.0)
@@ -787,7 +758,6 @@ class EvalTokens():
         "\n": "NEWLINE",
         "final": "FINAL",
         "static": "STATIC",
-        "unsigned": "UNSIGNED",
         "class": "CLASS",
         "interface": "INTERFACE",
         "extends": "EXTENDS",
@@ -1196,18 +1166,18 @@ EvalTokens.TWO_CHAR_OP['<='], EvalTokens.SINGLE_CHAR_OP['!'], EvalTokens.TWO_CHA
 LOOP_ACTIONS = [EvalTokens.TOKENS['break'], EvalTokens.TOKENS['continue']]
 RETURN_TYPE_STR = ('String', 'char', 'byte', 'short', 'int', 'long')
 
-def parseTokenAsType(token: str, acceptVoid: bool = False, isUnsigned: bool = False) -> object:
+def parseTokenAsType(token: str, acceptVoid: bool = False) -> object:
     match token:
         case 'IDENTIFIER':
             return type(resolveOperand(None, None, token))
         case 'BYTE_TYPE' | 'byte' | 'BYTE_LITERAL':
-            return UnsignedByte if isUnsigned else Byte
+            return Byte
         case 'SHORT_TYPE' | 'short' | 'SHORT_LITERAL':
-            return UnsignedShort if isUnsigned else Short
+            return Short
         case 'INT_TYPE' | 'int' | 'INT_LITERAL':
-            return UnsignedInt if isUnsigned else Int
+            return Int
         case 'LONG_TYPE' | 'long' | 'LONG_LITERAL':
-            return UnsignedLong if isUnsigned else Long
+            return Long
         case 'CHAR_TYPE' | 'char' | 'CHAR_LITERAL':
             return Char
         case 'STRING_TYPE' | 'String' | 'STRING_LITERAL':
@@ -1302,7 +1272,7 @@ def toRPN(tokens: TokenSlice) -> TokenSlice:
         output.append(top)
     
     return output
-NUMERIC_RANK = [Byte, UnsignedByte, Short, UnsignedShort, Int, UnsignedInt, Long, UnsignedLong, Float, Double]
+NUMERIC_RANK = [Byte, Short, Int, Long, Float, Double]
 ARITHMETIC_OPS = {'PLUS','MINUS','MULTIPLY','DIVIDE','MODULO'}
 def promote(a: Returnable, b: Returnable):
     return type(a) if NUMERIC_RANK.index(type(a)) >= NUMERIC_RANK.index(type(b)) else type(b)
@@ -1506,7 +1476,7 @@ def collapseTokenSlice(me: StackFrame | None, methodArgs: list | None, tokens: T
                 if close_bracket > i + 3:
                     size_tokens = tokens[i + 3:close_bracket]
                     size_value = Expression.evaluate(me, methodArgs, size_tokens)
-                    if not isinstance(size_value, (Int, UnsignedInt)):
+                    if not isinstance(size_value, Int):
                         raise RuntimeError("Array size must be an integer")
                     declared_size = size_value.get()
 
@@ -2033,7 +2003,7 @@ class Return:
 class LocalAssignment:
     @staticmethod
     def assign(me: StackFrame, methodArgs: list, assignArgs: list, valueByToken: TokenSlice, assignToClassType: ClassReference | None = None): #TODO: If assigning to a class, must provide another arugment for the type of variable assigning to.
-        valType = parseTokenAsType(assignArgs[0], isUnsigned=assignArgs[2])
+        valType = parseTokenAsType(assignArgs[0])
         val = Expression.evaluate(me, methodArgs, valueByToken)
         if not isinstance(val, ObjectReference):
             val = convertValue(val, valType)
@@ -2185,16 +2155,14 @@ class Method:
         if (tok_type in RETURN_TYPES or isClassAssign) and (self.next(by=2) == '=' or self.next(by=2) == ';'): # Local definition
             # <type> <name> = <value>;
             # <type> <name>;
-            isUnsignedType = (self.before() == 'unsigned')
-            parseBy = 1 if isUnsignedType else 0
             var_name = self.next()
-            self.tokPosition += 1 + parseBy
+            self.tokPosition += 1
             if var_name in self.me.locals:
                 raise NameError(f'The variable \'{var_name}\' was already declared in this context')
-            if self.next(1+parseBy) == '=':
+            if self.next(1) == '=':
                 assignToClass = ClassReference(tok_val) if isClassAssign else None
-                LocalAssignment.assign(self.me, self.args, [tok_val, var_name, isUnsignedType], self.read(self.peek(2+parseBy), ';'), assignToClass)
-            elif self.next(1+parseBy) == ';':
+                LocalAssignment.assign(self.me, self.args, [tok_val, var_name], self.read(self.peek(2), ';'), assignToClass)
+            elif self.next(1) == ';':
                 self.me.setLocal(var_name, parseTokenAsType(tok_val), default_value_for_type(parseTokenAsType(tok_val)))
             return False
         elif (tok_type in RETURN_TYPES) and self.peek().get()['type'] == 'LBRACKET':
@@ -2848,10 +2816,6 @@ class Method:
             # for (<type?> <id> = <val>; <id_reference_condition>; <stmt?>)
             # for (<type?> <id> : <collectionID>)
             parseIdBy = 0
-            isUnsigned = False 
-            if self.next(by=2) == 'unsigned':
-                isUnsigned = True
-                parseIdBy += 1
             if self.next(by=2,getType='type') not in RETURN_TYPES:
                 parseIdBy -= 1
             if self.next(by=4+parseIdBy) == '=':
@@ -2869,7 +2833,7 @@ class Method:
                     pass 
 
                 if idTypeRead['type'] in RETURN_TYPES:
-                    idType = parseTokenAsType(idTypeRead['val'], isUnsigned=isUnsigned)
+                    idType = parseTokenAsType(idTypeRead['val'])
                     idName = self.next(by=3+parseIdBy)
                     idValue = Expression.evaluate(self.me, self.me.getArgs(), self.read(self.peek(by=5), ';'))
                     self.me.setLocal(idName, idType, idValue)
@@ -2953,17 +2917,13 @@ class Method:
                     raise SyntaxError("Expected ':' in for-each loop")
                 
                 left_parts = forStmt[:colon_idx]
-                isUnsigned = False
-                if left_parts and left_parts[0].get()['val'] == 'unsigned':
-                    isUnsigned = True
-                    left_parts = left_parts[1:]
                 if left_parts[0].get()['val'] == '(': # Include '(' for some reason, strip it
                     left_parts = left_parts[1:]
                 if len(left_parts) != 2: 
                     raise SyntaxError("Malformed loop statement")
                 type_token = left_parts[0].get()['val']
                 var_name = left_parts[1].get()['val']
-                var_type = parseTokenAsType(type_token, isUnsigned=isUnsigned)
+                var_type = parseTokenAsType(type_token)
                 
                 collection_expr = forStmt[colon_idx + 1:]
                 collection = Expression.evaluate(self.me, self.args, collection_expr)
@@ -3080,8 +3040,7 @@ class Execution:
         self.currentInterface: str = ''
         self.states: dict[str, bool] = {
             'FINAL': False,
-            'STATIC': False,
-            'UNSIGNED': False
+            'STATIC': False
         }
         self.currentClass: str = ''
         self.info: dict[str, Any] = {} # Memory for the parser
@@ -3274,9 +3233,6 @@ class Execution:
             elif tok_type == EvalTokens.TOKENS['static']: # Sets static
                 self.states['STATIC'] = True
                 self.info['readBy'] = self.info.get('readBy', 1) + 1 # This makes the modifier keyword 2 spaces behind
-            elif tok_type == EvalTokens.TOKENS['unsigned']:
-                self.states['UNSIGNED'] = True
-                self.info['readBy'] = self.info.get('readBy', 1) + 1
             elif tok_type == EvalTokens.TOKENS['abstract']:
                 self.states['ABSTRACT'] = True
                 self.info['readBy'] = self.info.get('readBy', 1) + 1
@@ -3300,11 +3256,11 @@ class Execution:
                     if tok_type == 'TRUE' or tok_type == 'FALSE' or tok_type == 'BOOLEAN_TYPE':
                         t_type = Bool
                     else:
-                        t_type = parseTokenAsType(tok_type, isUnsigned=self.states['UNSIGNED'])
+                        t_type = parseTokenAsType(tok_type)
                     self.handleFieldDefinition(t_type, modifier, interface=isInterfaceField)
                 elif self.next(by=2) == ';':
                     self.mode = []
-                    self.handleNullFieldDefinition(parseTokenAsType(tok_type, isUnsigned=self.states['UNSIGNED']), modifier, interface=isInterfaceField)
+                    self.handleNullFieldDefinition(parseTokenAsType(tok_type), modifier, interface=isInterfaceField)
             elif tok_type == 'IDENTIFIER' and 'field_def' in self.mode:
                 #ClassName fieldName = ...; or ClassName fieldName;
                 if self.tokPosition >= 1:
@@ -3378,15 +3334,14 @@ class Execution:
                 continue
             elif tok_type == EvalTokens.TOKENS['('] and not is_constructor_call and self.before(2,'type') in (RETURN_TYPES + [EvalTokens.TOKENS['void']]): # METHOD
                 if 'method_def' in self.mode and self.currentClass and not self.currentInterface:
-                    # <modifier>, <static?>, <unsigned?>, <return_type>, <method_name> ( <...>
-                    #       5         4          3             2              1        ^ WE ARE HERE  
+                    # <modifier>, <static?>, <return_type>, <method_name> ( <...>
+                    #       4         3          2             1          ^ WE ARE HERE  
                     self.mode = ['is_active_method_def', 'arg_def']
                     args = argsList(self.handleArgumentDefinition())
                     checkedExecs = self.handleThrowStmt(token, len(list(args.keys())))
                     del self.info['thisMethodArgs']
                     parseby = 1 if self.states['STATIC'] else 0
-                    parseby += 1 if self.states['UNSIGNED'] else 0
-                    methodReturnType = parseTokenAsType(self.before(by=2), True, self.states['UNSIGNED'])
+                    methodReturnType = parseTokenAsType(self.before(by=2), True)
                     search_pos = self.tokPosition - 3
                     methodModifier = 'default'
                     while search_pos >= 0:
@@ -3416,10 +3371,9 @@ class Execution:
                 elif self.currentInterface:
                     # Interface method definition
                     parseby = 1 if self.states['STATIC'] else 0
-                    parseby += 1 if self.states['UNSIGNED'] else 0
                     args = argsList(self.handleArgumentDefinition())
                     checkedExecs = self.handleThrowStmt(token, len(list(args.keys())))
-                    methodReturnType = parseTokenAsType(self.before(by=2), True, self.states['UNSIGNED'])
+                    methodReturnType = parseTokenAsType(self.before(by=2), True)
                     methodModifier = self.before(by=3+parseby)
                     if str(methodModifier).isspace():
                         methodModifier = 'default'
@@ -3516,7 +3470,7 @@ class Execution:
                         base_type = type_part.split('[')[0].strip()
                         try:
                             if base_type in RETURN_TYPE_STR:
-                                arr_type = parseTokenAsType(base_type, isUnsigned=self.states['UNSIGNED'])
+                                arr_type = parseTokenAsType(base_type)
                                 arg_type = PrimitiveArrayWrapper(arr_type)
                             elif isClass(base_type):
                                 arg_type = PrimitiveArrayWrapper(ClassType(base_type))
@@ -3535,13 +3489,13 @@ class Execution:
                 arg_type_token, arg_name = parts
                 
                 try:
-                    isValidReturnType(parseTokenAsType(arg_type_token, isUnsigned=self.states['UNSIGNED']))
-                    arg_type = parseTokenAsType(arg_type_token, isUnsigned=self.states['UNSIGNED'])
+                    isValidReturnType(parseTokenAsType(arg_type_token))
+                    arg_type = parseTokenAsType(arg_type_token)
                 except ValueError:
                     if '[' in arg_type_token and ']' in arg_type_token:
                         base_type = arg_type_token.split('[')[0]
                         if base_type in RETURN_TYPE_STR or isClass(base_type):
-                            arr_type = parseTokenAsType(base_type, isUnsigned=self.states['UNSIGNED'])
+                            arr_type = parseTokenAsType(base_type)
                             arg_type = PrimitiveArrayWrapper(arr_type)
                         else:
                             raise RuntimeError(f'Could not resolve array type: {arg_type_token}')
@@ -3589,7 +3543,6 @@ class Execution:
         self.states = {
             'FINAL': False,
             'STATIC': False,
-            'UNSIGNED': False,
         }
     def handleMethodBodyContent(self, currentToken: Token):
         # Code is not evaluated until an actual method call is made, so no need to parse or evaluate code for now.
