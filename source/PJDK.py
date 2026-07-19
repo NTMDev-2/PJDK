@@ -198,7 +198,7 @@ def isConsistentTypes(thisType: object, otherType: object) -> bool:
         raise TypeError(f'Type {otherType.__name__} does not support type {thisType.__name__}')
     
     raise TypeError(f'Type {otherType.__name__} does not support type {thisType.__name__}')
-def hasCheckdAllExeceptions(ownerName: str, thisMethodName: str, ownerAsInterface: bool = False):
+def hasCheckedAllExeceptions(ownerName: str, thisMethodName: str, ownerAsInterface: bool = False):
     """
     Static (parse-time) check: for every call inside <thisMethodName>'s body to another
     method that declares exceptions in its own 'throws' clause, verify that this method
