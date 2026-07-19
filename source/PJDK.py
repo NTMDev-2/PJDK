@@ -3995,7 +3995,7 @@ class Execution:
             interfaces[self.currentInterface]['methods'][self.info['thisMethodName']]['abstract'] = False
         
         holder = self.currentClass if not self.currentInterface else self.currentInterface
-        hasCheckdAllExeceptions(holder, self.info['thisMethodName'], not not self.currentInterface)
+        hasCheckedAllExeceptions(holder, self.info['thisMethodName'], not not self.currentInterface)
         self.tokPosition = closeIndex - 1
 def invokeMethod(className: str, methodName: str, args: list, caller: str, thisRef: 'ObjectReference | None' = None, startClass: str | None = None, isInterfaceMethod: bool = False) -> Returnable:
     if not isInterfaceMethod:
