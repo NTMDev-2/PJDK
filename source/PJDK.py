@@ -1438,7 +1438,7 @@ def toRPN(tokens: TokenSlice) -> TokenSlice:
     for i, tok in enumerate(tokens):
         t = tok.get()['type']
         if t in ('RESOLVED_VALUE', 'INT_LITERAL', 'LONG_LITERAL', 'BYTE_LITERAL',
-                 'SHORT_LITERAL', 'FLOAT_LITERAL', 'DOUBLE_LITERAL', 'STRING_LITERAL',
+                 'SHORT_LITERAL', 'FLOAT_LITERAL', 'DOUBLE_LITERAL', 'STRING_LITERAL', 'CHAR_LITERAL',
                  'IDENTIFIER', 'TRUE', 'FALSE', 'NULL'):
             if t == 'NULL':
                 output.append(Null())
@@ -1999,6 +1999,8 @@ def resolveOperand(me: StackFrame | None, methodArgs: list | None, tok: Token | 
         return resolveValue(me, methodArgs, tok)
     if t == 'STRING_LITERAL':
         return String(val)
+    if t == 'CHAR_LITERAL':
+        return Char(val)
     raise SyntaxError(f"Cannot resolve operand: {t} (value: '{val}')")
 def convertValue(value: object, target_type: object, allowLossy: bool = False) -> object:
     if isinstance(value, target_type):
