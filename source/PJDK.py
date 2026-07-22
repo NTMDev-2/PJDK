@@ -1629,7 +1629,7 @@ def resolveDotChain(me: 'StackFrame | None', methodArgs: 'list | None', tokens: 
                 # Check if field exists
                 if field_class in memory and memberName in memory[field_class]['fields']:
                     thisFieldInfo = memory[field_class]['fields'][memberName]
-                    isAllowedAtThisScope(thisFieldInfo['modifier'], thisScope, packagePrespectiveOfClass(me.class_name, callerClass), thisFieldInfo['name'])
+                    isAllowedAtThisScope(thisFieldInfo['modifier'], thisScope, packagePrespectiveOfClass(me.class_name, callerClass), False, thisFieldInfo['name'])
                     current = current.get().fields.get(memberName, Null())
                 else:
                     raise RuntimeError(f"Field '{memberName}' not found in class '{field_class}'")
@@ -2193,7 +2193,6 @@ def perspectiveOfClass(_class: str, _relativeToClass: str) -> str:
         raise NameError(f'Class or interface {_class} is not defined')
     elif not isClass(_relativeToClass) and not isInterface(_relativeToClass):
         raise NameError(f'Class or interface {_relativeToClass} is not defined') 
-
     if _class == _relativeToClass:
         return 'this'
     if isInterface(_class):
@@ -2943,6 +2942,143 @@ class Method:
                 else:
                     self.skipBlock()
             
+            return False
+        elif tok_type == 'SWITCH':
+            # switch (<expression>) { case <value>: <statements> break; ... default: <statements> }
+            
+            self.tokPosition += 1
+            
+            if self.tokPosition >= len(self.lang) or self.lang[self.tokPosition].get()['type'] != 'LPAREN':
+                raise SyntaxError("Expected '(' after 'switch'")
+            
+            self.tokPosition += 1
+            
+            expr_tokens = []
+            depth = 1
+            while self.tokPosition < len(self.lang):
+                t = self.lang[self.tokPosition].get()['type']
+                if t == 'LPAREN':
+                    depth += 1
+                elif t == 'RPAREN':
+                    depth -= 1
+                    if depth == 0:
+                        self.tokPosition += 1  # skip ')'
+                        break
+                expr_tokens.append(self.lang[self.tokPosition])
+                self.tokPosition += 1
+            body_start, after_switch_pos = self.scanBlock(self.tokPosition)
+            switch_value = Expression.evaluate(self.me, self.args, expr_tokens)
+            
+            if self.tokPosition >= len(self.lang) or self.lang[self.tokPosition].get()['type'] != 'START_DECLARATION':
+                raise SyntaxError("Expected '{' after switch expression")
+            self.tokPosition += 1  # skip '{'
+
+            default_case = None
+            case_positions = {}
+            
+            scan_pos = self.tokPosition
+            declr_depth = 1
+            while scan_pos < len(self.lang):
+                t = self.lang[scan_pos].get()['type']
+                if t == 'START_DECLARATION':
+                    declr_depth += 1
+                    scan_pos += 1
+                    continue
+                elif t == 'END_DECLARATION':
+                    declr_depth -= 1
+                    if declr_depth == 0:
+                        break
+                    scan_pos += 1
+                    continue
+                    
+                if t == 'CASE':
+                    scan_pos += 1
+                    case_value_tokens = []
+                    while scan_pos < len(self.lang):
+                        tok = self.lang[scan_pos]
+                        if tok.get()['type'] == 'COLON':
+                            scan_pos += 1
+                            break
+                        case_value_tokens.append(tok)
+                        scan_pos += 1
+                    case_value = Expression.evaluate(self.me, self.args, case_value_tokens)
+                    case_positions[scan_pos] = ('case', case_value)
+                    while scan_pos < len(self.lang):
+                        t2 = self.lang[scan_pos].get()['type']
+                        if t2 == 'START_DECLARATION':
+                            declr_depth += 1
+                        elif t2 == 'END_DECLARATION':
+                            declr_depth -= 1
+                            if declr_depth == 0:
+                                break
+                        if t2 in ('CASE', 'DEFAULT', 'END_DECLARATION'):
+                            if t2 == 'END_DECLARATION' and declr_depth == 0:
+                                break
+                            break
+                        scan_pos += 1
+                elif t == 'DEFAULT':
+                    scan_pos += 1
+                    if scan_pos >= len(self.lang) or self.lang[scan_pos].get()['type'] != 'COLON':
+                        raise SyntaxError("Expected ':' after 'default'")
+                    scan_pos += 1
+                    default_case = scan_pos
+                    
+                    while scan_pos < len(self.lang):
+                        t2 = self.lang[scan_pos].get()['type']
+                        if t2 == 'START_DECLARATION':
+                            declr_depth += 1
+                        elif t2 == 'END_DECLARATION':
+                            declr_depth -= 1
+                            if declr_depth == 0:
+                                break
+                        if t2 in ('CASE', 'DEFAULT'):
+                            break
+                        scan_pos += 1
+                else:
+                    scan_pos += 1
+            matched_case_pos = None
+            for pos, (case_type, case_value) in case_positions.items():
+                if case_type == 'case' and switch_value.get() == case_value.get():
+                    matched_case_pos = pos
+                    break
+            passed_none = False
+            if matched_case_pos is None and default_case is not None:
+                matched_case_pos = default_case
+            elif matched_case_pos is None and default_case is None:
+                passed_none = True
+
+            if matched_case_pos is not None and not passed_none:
+                self.tokPosition = matched_case_pos
+                
+                while self.tokPosition < len(self.lang):
+                    t = self.lang[self.tokPosition].get()['type']
+                    
+                    if t == 'START_DECLARATION':
+                        nested_depth = 1
+                        self.tokPosition += 1
+                        while self.tokPosition < len(self.lang) and nested_depth > 0:
+                            t2 = self.lang[self.tokPosition].get()['type']
+                            if t2 == 'START_DECLARATION':
+                                nested_depth += 1
+                            elif t2 == 'END_DECLARATION':
+                                nested_depth -= 1
+                            self.tokPosition += 1
+                        continue
+                    if t == 'END_DECLARATION':
+                        self.tokPosition += 1
+                        break
+                    if t == 'BREAK':
+                        self.tokPosition += 1
+                        if self.tokPosition < len(self.lang) and self.lang[self.tokPosition].get()['type'] == 'SEMICOLON':
+                            self.tokPosition += 1
+                        break
+                    if t in ('CASE', 'DEFAULT'):
+                        if (t == 'CASE' and matched_case_pos != self.tokPosition) or t == 'DEFAULT':
+                            break
+                    result = self.executeLine()
+                    if result:
+                        return result
+            self.tokPosition += after_switch_pos
             return False
         elif tok_type == 'WHILE':
             self.tokPosition += 1
