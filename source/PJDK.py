@@ -1,12 +1,12 @@
 # mypy: ignore-errors
 import builtins
 from typing import Any#, Optional
-import operator as pyop
-from pathlib import Path 
 import struct
 import subprocess
 import traceback
 import time
+import operator as pyop
+from pathlib import Path
 
 staticVariables: dict[str, dict] = {}
 staticMethods: dict[str, dict] = {}
@@ -120,7 +120,7 @@ class Char(Returnable, Nullable):
 class Void(Returnable, Nullable):
     def __repr__(self):
         return "Void"
-class Null():
+class Null:
     def __repr__(self):
         return "Null"
     def get(self):
@@ -366,7 +366,6 @@ def createClass(className: str, classModifier: str, package: str, superClass: Cl
                         'throws': m_body.get('throws', []),
                         'abstract': True,
                         'package': package,
-                        'abstract': isAbstract
                     }
                 elif not m_body.get('abstract', True) and m_name not in inherited and m_body.get('body'):
                     inherited[m_name] = {
@@ -379,7 +378,6 @@ def createClass(className: str, classModifier: str, package: str, superClass: Cl
                         'body': m_body['body'],
                         'abstract': False,
                         'package': package,
-                        'abstract': isAbstract
                     }
 
     memory[className] = {
@@ -392,7 +390,7 @@ def createClass(className: str, classModifier: str, package: str, superClass: Cl
         'package': package,
         'abstract': isAbstract
     }
-def createMethod(thisClass: ClassReference, methodName: str, methodModifier: str, methodReturnType: object, package: str, isStatic: bool = False, methodArgs: dict = {}, throws: list = []):
+def createMethod(thisClass: ClassReference, methodName: str, methodModifier: str, methodReturnType: object, package: str, isStatic: bool = False, methodArgs: dict = {}, throws: list = [], isAbstract: bool = False):
     isValidReturnType(methodReturnType)
     isValidModifier(methodModifier)
     classInfo = memory[thisClass.getClass()]
@@ -423,7 +421,8 @@ def createMethod(thisClass: ClassReference, methodName: str, methodModifier: str
             'static': isStatic,
             'args': methodArgs,
             'throws': throws,
-            'package': package
+            'package': package,
+            'abstract': isAbstract
         }
         existing.append(new_method)
         methodInfo[methodName] = existing
@@ -435,7 +434,8 @@ def createMethod(thisClass: ClassReference, methodName: str, methodModifier: str
             'static': isStatic,
             'args': methodArgs,
             'throws': throws,
-            'package': package
+            'package': package,
+            'abstract': isAbstract
         }
     
     if isStatic:
@@ -445,7 +445,8 @@ def createMethod(thisClass: ClassReference, methodName: str, methodModifier: str
             'modifier': methodModifier,
             'returns': methodReturnType,
             'args': methodArgs,
-            'package': package
+            'package': package,
+            'abstract': isAbstract
         }
 def createConstructor(className: str, modifier: str, package: str, body: str, args: dict = {}):
     isValidModifier(modifier)
@@ -566,7 +567,7 @@ def setField(className: ClassReference, fieldName: str, fieldModifier: str, fiel
             'package': package
         }
 
-class HeapInstance():
+class HeapInstance:
     def __init__(self, className: str):
         self.className = className
         self.init: bool = False
@@ -582,7 +583,7 @@ class HeapInstance():
             'fields': self.fields,
             'locals': self.locals
         }
-class ObjectReference():
+class ObjectReference:
     def __init__(self, HeapId: int):
         self.HeapId = HeapId
     def get(self) -> HeapInstance:
@@ -892,7 +893,7 @@ class ArrayAssignment:
                 )
             return var_name, arrayType, array_value, pos
 
-class EvalTokens():
+class EvalTokens:
     TOKENS = {
         "{": "START_DECLARATION",
         "}": "END_DECLARATION",
@@ -1038,7 +1039,7 @@ class Token:
         if current: 
             groups.append(current)
         return [g for g in groups if g]
-class Intepreter():
+class Intepreter:
     def __init__(self, fileCode: str):
         self.fileCode: str = fileCode
         self.position = 0
@@ -2081,7 +2082,78 @@ def validateInterfaceImplementation(className: str, interfaceName: str):
                     )
             except KeyError:
                 continue
+def validateAbstractImplementation(className: str, abstractClassName: str):
+    
+    if className not in memory:
+        raise NameError(f"Class '{className}' is not defined")
+    if abstractClassName not in memory:
+        raise NameError(f"Abstract class '{abstractClassName}' is not defined")
+    if not memory[abstractClassName].get('abstract', False):
+        raise TypeError(f"Class '{abstractClassName}' is not abstract")
+    
+    class_info = memory[className]
+    abstract_class_info = memory[abstractClassName]
+    
+    # Check each method in the abstract class
+    for method_name, methodInfo in abstract_class_info['methods'].items():
+        # Skip non-abstract methods
+        if not methodInfo.get('abstract', False):
+            continue
         
+        # Check if the concrete class implements this method
+        if method_name not in class_info['methods']:
+            raise NotImplementedError(
+                f"Class '{className}' does not implement abstract method '{method_name}' "
+                f"from abstract class '{abstractClassName}'"
+            )
+        
+        # Get the implementation in the concrete class
+        classEntry = class_info['methods'][method_name]
+        classOverloads = classEntry if isinstance(classEntry, list) else [classEntry]
+        
+        # Find a matching overload that has a body (is implemented)
+        matching = None
+        for class_method in classOverloads:
+            # Skip if still abstract or has no body
+            if class_method.get('abstract', True) or not class_method.get('body'):
+                continue
+            # Check return type match
+            if class_method['returns'] != methodInfo['returns']:
+                continue
+            # Check argument types match
+            if class_method.get('args', {}) != methodInfo.get('args', {}):
+                continue
+            matching = class_method
+            break
+        
+        if matching is None:
+            # No matching implementation found
+            # Check if at least one overload has a body (any matching signature)
+            has_body = False
+            for class_method in classOverloads:
+                if not class_method.get('abstract', True) and class_method.get('body'):
+                    has_body = True
+                    # Check return type
+                    if class_method['returns'] != methodInfo['returns']:
+                        raise TypeError(
+                            f"Return type mismatch for method '{method_name}': "
+                            f"abstract class expects {methodInfo['returns'].__name__}, "
+                            f"class provides {class_method['returns'].__name__}"
+                        )
+                    # Check arguments
+                    if class_method.get('args', {}) != methodInfo.get('args', {}):
+                        raise TypeError(
+                            f"Argument mismatch for method '{method_name}': "
+                            f"abstract class expects {methodInfo.get('args', {})}, "
+                            f"class provides {class_method.get('args', {})}"
+                        )
+                    break
+            
+            if not has_body:
+                raise TypeError(
+                    f"Method '{method_name}' in class '{className}' cannot be abstract. "
+                    f"It must provide an implementation."
+                )
 class Expression:
     @staticmethod
     def evaluate(me: StackFrame | None, methodArgs: list | None, tokens: TokenSlice, forceType: str = 'int') -> Returnable:
@@ -3610,7 +3682,7 @@ class Execution:
                 if prev_token.get()['type'] == 'NEW':
                     is_constructor_call = True
             
-            if self.currentClass and not self.info.get('isInMethod', False) and 'field_def' not in self.mode: # Applies context based on 'default'
+            if self.currentClass and not self.info.get('isInMethod', False) and 'field_def' not in self.mode: # Applies context based on 'default'  # noqa: SIM102
                 if tok_type in RETURN_TYPES or (tok_type == 'IDENTIFIER' and tok_val in memory):
                     next_token = self.peek(1) if self.tokPosition + 1 < len(self.lang) else None
                     next_next_token = self.peek(2) if self.tokPosition + 2 < len(self.lang) else None
@@ -3620,7 +3692,7 @@ class Execution:
                             self.mode.append('field_def')
             if tok_type == EvalTokens.TOKENS['(']:
                 self.info['parenStack'] = self.info.get('parenStack', 0) + 1
-            
+
             if tok_type == 'EOF':
                 if self.info.get('braceStack', 0) > 0:
                     raise SyntaxError(f'Reached EOF, but there were still {self.info.get("braceStack")} unclosed braces')
@@ -3665,6 +3737,13 @@ class Execution:
                     self.scope_stack.pop()
                     for interface_name in memory[self.currentClass]['implements']:
                         validateInterfaceImplementation(self.currentClass, interface_name)
+
+                    super_class_ref = memory[self.currentClass].get('super')
+                    if super_class_ref is not None:
+                        super_name = super_class_ref.getClass()
+                        if super_name != 'Object' and memory.get(super_name, {}).get('abstract', False):
+                            validateAbstractImplementation(self.currentClass, super_name)
+                    
                     self.currentClass = ''
                 elif self.currentInterface:
                     self.scope_stack.pop()
@@ -3697,7 +3776,7 @@ class Execution:
                 self.mode = []
                 modifier = ''
                 readModifierBy = 1
-                isThisAbstract = self.info.get('ABSTRACT', False)
+                isThisAbstract = self.states.get('ABSTRACT', False)
                 if isThisAbstract:
                     readModifierBy = -1
                 if self.tokPosition == 1:
@@ -3719,7 +3798,7 @@ class Execution:
                     readByOffset = 3 if self.next(3) == 'implements' else 1
                     startRead = self.tokPosition + readByOffset
                     
-                    for token in self.lang[startRead+1:endClassDeclr+1]: # skip 'implements'
+                    for token in self.lang[startRead+1:endClassDeclr+1]: # skip 'implements' 
                         if token.get()['val'] in (',', '{'):
                             if not isInterface(thisClassImplements[-1]):
                                 raise NameError(f'Interface {thisClassImplements[-1]} does not exist')
@@ -3737,6 +3816,8 @@ class Execution:
                 self.tokPosition = endClassDeclr-1
                 self.currentClass = class_name
                 self.clear()
+                if isThisAbstract:
+                    self.info['isAbstractClass'] = True
             elif tok_type == EvalTokens.TOKENS['interface']:
                 name = self.next()
                 supers = []
@@ -3936,9 +4017,12 @@ class Execution:
                         if len(args) > 1:
                             raise Exception(f'The {ENTRY_METHOD_NAME} method must not have more than 1 argument')
                     ENTRY['entryClass'] = self.currentClass
-                elif self.currentInterface:
+                elif self.currentInterface or self.info.get('isAbstractClass', False):
                     # Interface method definition
+                    
                     parseby = 1 if self.states['STATIC'] else 0
+                    if self.info.get('isAbstractClass', False):
+                        parseby += 1
                     args = argsList(self.handleArgumentDefinition())
                     checkedExecs = self.handleThrowStmt(token, len(list(args.keys())))
                     methodReturnType = parseTokenAsType(self.before(by=2), True)
@@ -3962,8 +4046,10 @@ class Execution:
                     
                     isAbstract = not has_body
                     isStatic = self.states['STATIC']
-                    
-                    setInterfaceMethod(self.currentInterface, self.before(), methodReturnType, methodModifier, self.packageName, args, checkedExecs, isAbstract, isStatic)
+                    if not self.currentClass:
+                        setInterfaceMethod(self.currentInterface, self.before(), methodReturnType, methodModifier, self.packageName, args, checkedExecs, isAbstract, isStatic)
+                    else:
+                        createMethod(ClassReference(self.currentClass), self.before(), methodModifier, methodReturnType, self.packageName, isStatic, args, checkedExecs, isAbstract)
                     self.clear(noClearMode=True, noClearInfo=True)
                     
                     if has_body:
@@ -4137,14 +4223,20 @@ class Execution:
                     arg_types = list(args.values())
                     
                     found_method = findOverloadByDeclaredTypes(method_entry, arg_types)
-                    
                     if found_method is not None:
+                        # Check if this method was declared as abstract
+                        if found_method.get('abstract', False):
+                            raise AttributeError(f'The abstract method {found_method["name"]} cannot have an implementation')
                         found_method['body'] = methodBody.strip()
-                        found_method['abstract'] = False
+                        found_method['abstract'] = False  # Now it's no longer abstract since it has a body
                     else:
+                        if method_entry[0].get('abstract', False):
+                            raise AttributeError(f'The abstract method {method_entry[0]["name"]} cannot have an implementation')
                         method_entry[0]['body'] = methodBody.strip()
                         method_entry[0]['abstract'] = False
                 else:
+                    if method_entry.get('abstract', False):
+                        raise AttributeError(f'The abstract method {method_entry["name"]} cannot have an implementation')
                     method_entry['body'] = methodBody.strip()
                     method_entry['abstract'] = False
         else:
