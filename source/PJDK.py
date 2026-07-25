@@ -1,12 +1,12 @@
 # mypy: ignore-errors
 import builtins
-from typing import Any#, Optional
+import operator as pyop
 import struct
 import subprocess
-import traceback
 import time
-import operator as pyop
+import traceback
 from pathlib import Path
+from typing import Any  #, Optional
 
 staticVariables: dict[str, dict] = {}
 staticMethods: dict[str, dict] = {}
@@ -49,28 +49,28 @@ class _IntegerBase(Numeric, Returnable):
     def get(self):
         return self.value
 
-class Byte(_IntegerBase, Nullable):
+class Byte(_IntegerBase):
     bits = 8
     @classmethod
     def get_bits(cls):
         return cls.bits
-class Short(_IntegerBase, Nullable):
+class Short(_IntegerBase):
     bits = 16
     @classmethod
     def get_bits(cls):
         return cls.bits
-class Int(_IntegerBase, Nullable):
+class Int(_IntegerBase):
     bits = 32
     @classmethod
     def get_bits(cls):
         return cls.bits
-class Long(_IntegerBase, Nullable):
+class Long(_IntegerBase):
     bits = 64
     @classmethod
     def get_bits(cls):
         return cls.bits
 
-class Double(Numeric, Returnable, Nullable):
+class Double(Numeric, Returnable):
     bits = 64
     def __init__(self, value: float = 0.0):
         if isinstance(value, (Float, Double)):
@@ -82,7 +82,7 @@ class Double(Numeric, Returnable, Nullable):
     def get(self): return self.value
     def to_bytes(self): return struct.pack('>d', self.value)
     def __repr__(self): return f"Double({self.value})"
-class Float(Numeric, Returnable, Nullable):
+class Float(Numeric, Returnable):
     bits = 32
     @classmethod
     def get_bits(cls):
@@ -95,7 +95,7 @@ class Float(Numeric, Returnable, Nullable):
     def to_bytes(self): return struct.pack('>f', self.value)
     def __repr__(self): return f"Float({self.value})"
 
-class Bool(Returnable, Nullable):
+class Bool(Returnable):
     def __init__(self, value: bool):
         self.value = value
     def get(self):
@@ -110,21 +110,25 @@ class String(Returnable, Nullable):
         return self.value
     def __repr__(self):
         return f"{self.value}"
-class Char(Returnable, Nullable):
+class Char(Returnable):
     def __init__(self, value: str):
         self.value = value[0]
     def get(self):
         return self.value
     def __repr__(self):
         return f"Char({self.value})"
-class Void(Returnable, Nullable):
+class Void(Returnable):
     def __repr__(self):
         return "Void"
+
+class NO_INIT:
+    pass
 class Null:
     def __repr__(self):
         return "Null"
     def get(self):
         return None
+
 class ExceptionValue(Returnable):
     def __init__(self, excType: type, message: str):
         self.excType = excType
@@ -169,14 +173,20 @@ def isAllowedAtThisScope(modifier: str, thisScope: str, packageScope: str = 'thi
     else:
         raise PermissionError(f'Attempted to access item "{item}" without sufficient permission')
 def isConsistentTypes(thisType: object, otherType: object) -> bool:
-    if isinstance(otherType, ClassType):
-        if otherType.get() == 'Object':
+    if isinstance(otherType, ClassType) and otherType.get() == 'Object':
+        return True
+    if otherType is NO_INIT or thisType is NO_INIT or isinstance(otherType, NO_INIT) or isinstance(thisType, NO_INIT):
+        return True
+    if isinstance(otherType, Null) or otherType is Null:
+        if type(thisType) is ClassType:  # noqa: SIM114
             return True
-
-    if isinstance(otherType, Null) or otherType is Null and issubclass(thisType, Nullable):
-        return True
-    if isinstance(thisType, Null) or thisType is Null and issubclass(otherType, Nullable):
-        return True
+        elif issubclass(thisType, Nullable):
+            return True
+    if (isinstance(thisType, Null) or thisType is Null) and issubclass(otherType, Nullable):
+        if type(otherType) is ClassType:  # noqa: SIM114
+            return True
+        elif issubclass(otherType, Nullable):
+            return True
 
     if isinstance(thisType, ClassType) or thisType is ClassType or thisType is ClassReference:
         if isinstance(otherType, ObjectReference) or otherType is ObjectReference:
@@ -648,6 +658,8 @@ def newObject(class_name: str, constructorArgs: list = [], callerClass: str = ''
     obj = HeapInstance(class_name)
     
     class_info = memory[class_name]
+    if class_info['abstract']:
+        raise NotImplementedError(f'The abstract class {class_name} cannot be instantiated')
     for _, field_def in list(class_info.get('fields', {}).items()):
         field_name = field_def['name']
         default_value = field_def['value']
@@ -684,7 +696,6 @@ def newObject(class_name: str, constructorArgs: list = [], callerClass: str = ''
         # Pop the constructor frame
         popFrame()
     
-
     obj_id = nextHeapId
     nextHeapId += 1
     heap[obj_id] = obj
@@ -1920,7 +1931,7 @@ def resolveValue(me: StackFrame | None, methodArgs: list | None, tok: Token):
             
     if foundRetValue is None:
         raise RuntimeError(f"'{name}' could not be resolved locally, statically or non-statically, in context of Class '{me.class_name}'")
-    elif isinstance(foundRetValue, Null):
+    elif isinstance(foundRetValue, NO_INIT):
         raise RuntimeError(f'Variable "{tok.get()['val']}" might not have been initialized')
     else:
         return foundRetValue
@@ -2012,6 +2023,10 @@ def resolveOperand(me: StackFrame | None, methodArgs: list | None, tok: Token | 
         return Char(val)
     raise SyntaxError(f"Cannot resolve operand: {t} (value: '{val}')")
 def convertValue(value: object, target_type: object, allowLossy: bool = False) -> object:
+    if isinstance(value, Null):
+        if target_type in (Int, Long, Byte, Short, Float, Double, Bool, Char):
+            return Null()
+        return Null()
     if isinstance(value, target_type):
         return value
     if isinstance(target_type, type) and issubclass(target_type, Numeric) and isinstance(value, Numeric):
@@ -2083,7 +2098,9 @@ def validateInterfaceImplementation(className: str, interfaceName: str):
             except KeyError:
                 continue
 def validateAbstractImplementation(className: str, abstractClassName: str):
-    
+    if memory[className]['abstract']:
+        return
+
     if className not in memory:
         raise NameError(f"Class '{className}' is not defined")
     if abstractClassName not in memory:
@@ -2094,53 +2111,40 @@ def validateAbstractImplementation(className: str, abstractClassName: str):
     class_info = memory[className]
     abstract_class_info = memory[abstractClassName]
     
-    # Check each method in the abstract class
     for method_name, methodInfo in abstract_class_info['methods'].items():
-        # Skip non-abstract methods
         if not methodInfo.get('abstract', False):
             continue
-        
-        # Check if the concrete class implements this method
         if method_name not in class_info['methods']:
             raise NotImplementedError(
                 f"Class '{className}' does not implement abstract method '{method_name}' "
                 f"from abstract class '{abstractClassName}'"
             )
         
-        # Get the implementation in the concrete class
         classEntry = class_info['methods'][method_name]
         classOverloads = classEntry if isinstance(classEntry, list) else [classEntry]
         
-        # Find a matching overload that has a body (is implemented)
         matching = None
         for class_method in classOverloads:
-            # Skip if still abstract or has no body
             if class_method.get('abstract', True) or not class_method.get('body'):
                 continue
-            # Check return type match
             if class_method['returns'] != methodInfo['returns']:
                 continue
-            # Check argument types match
             if class_method.get('args', {}) != methodInfo.get('args', {}):
                 continue
             matching = class_method
             break
         
         if matching is None:
-            # No matching implementation found
-            # Check if at least one overload has a body (any matching signature)
             has_body = False
             for class_method in classOverloads:
                 if not class_method.get('abstract', True) and class_method.get('body'):
                     has_body = True
-                    # Check return type
                     if class_method['returns'] != methodInfo['returns']:
                         raise TypeError(
                             f"Return type mismatch for method '{method_name}': "
                             f"abstract class expects {methodInfo['returns'].__name__}, "
                             f"class provides {class_method['returns'].__name__}"
                         )
-                    # Check arguments
                     if class_method.get('args', {}) != methodInfo.get('args', {}):
                         raise TypeError(
                             f"Argument mismatch for method '{method_name}': "
@@ -2154,6 +2158,7 @@ def validateAbstractImplementation(className: str, abstractClassName: str):
                     f"Method '{method_name}' in class '{className}' cannot be abstract. "
                     f"It must provide an implementation."
                 )
+
 class Expression:
     @staticmethod
     def evaluate(me: StackFrame | None, methodArgs: list | None, tokens: TokenSlice, forceType: str = 'int') -> Returnable:
@@ -2336,17 +2341,20 @@ class LocalAssignment:
     def assign(me: StackFrame, methodArgs: list, assignArgs: list, valueByToken: TokenSlice, assignToClassType: ClassReference | None = None): #TODO: If assigning to a class, must provide another arugment for the type of variable assigning to.
         valType = parseTokenAsType(assignArgs[0])
         val = Expression.evaluate(me, methodArgs, valueByToken)
-        if not isinstance(val, ObjectReference):
+
+        if not isinstance(val, (ObjectReference, Null)):
             val = convertValue(val, valType)
         if valType is ClassType:
-            # Expecting an object reference
+            if type(val) is Null:
+                me.setLocal(assignArgs[1], ClassType(assignArgs[0]), Null())
+                return
+            
             if not isinstance(val, ObjectReference):
-                raise TypeError(f"Expected ObjectReference, got {type(val)}")
-            # Check class compatibility
+                raise TypeError(f"Expected ObjectReference, got {type(val).__name__}")
             if assignToClassType is None:
                 raise TypeError('The variable provided does not accept ClassType or ClassReference')
-            expected = assignToClassType.getClass()
             actual = val.getClass()
+            expected = assignToClassType.getClass()
             if actual != expected and actual not in getHierarchyOfClass(expected):
                 raise TypeError(f"Type mismatch: expected {expected}, got {actual}")
             me.setLocal(assignArgs[1], ClassType(actual), val)
@@ -2499,7 +2507,7 @@ class Method:
 
         if (tok_type in RETURN_TYPES or isClassAssign) and (self.next(by=2) == '=' or self.next(by=2) == ';'): # Local assignment
             var_name = self.next()
-            self.tokPosition += 2  
+            self.tokPosition += 2
             if self.tokPosition < len(self.lang) and self.lang[self.tokPosition].get()['type'] == 'ASSIGN':
                 self.tokPosition += 1  # Skip '='
                 
@@ -2517,13 +2525,12 @@ class Method:
                     LocalAssignment.assign(self.me, self.args, [tok_val, var_name], rhs_tokens, assignToClass)
                 else:
                     LocalAssignment.assign(self.me, self.args, [tok_val, var_name], rhs_tokens)
-            
-            elif self.next(1) == ';':
+            elif self.next(0) == ';':
                 self.tokPosition += 1  # Skip ';'
                 if isClassAssign:
-                    self.me.setLocal(var_name, ClassType(tok_val), Null())
+                    self.me.setLocal(var_name, ClassType(tok_val), NO_INIT())
                 else:
-                    self.me.setLocal(var_name, parseTokenAsType(tok_val), Null())
+                    self.me.setLocal(var_name, parseTokenAsType(tok_val), NO_INIT())
             return False
         elif (tok_type in RETURN_TYPES or isClass(tok_val)) and self.peek().get()['type'] == 'LBRACKET':
             result = ArrayAssignment.parse(self.lang, self.tokPosition, tok_type, self.me, self.args)
@@ -3589,11 +3596,16 @@ class Method:
                 else:
                     value = Expression.evaluate(self.me, self.me.getArgs(), inner_tokens)
                 endChar = '\n' if tok_type == 'NATIVE_PRINT_STMT' else ''
-                if hasattr(value, 'get'):
-                    value = value.get() if type(value.get()).__module__ == 'builtins' else f'[INTERNAL] {type(value.get()).__name__}@{hex(id(value.get()))}'
+                if isinstance(value, Null) or value is Null:
+                    value = '[INTERNAL] null'
+                elif hasattr(value, 'get'):
+                    if isinstance(value, ObjectReference):
+                        value = f'[INTERNAL] {value.getClass()}@{hex(id(value.get()))}'
+                    else:
+                        value = value.get() if type(value.get()).__module__ == 'builtins' else f'[INTERNAL] {type(value.get()).__name__}@{hex(id(value.get()))}'
                 else:
                     if value is Void:
-                        value = f'[WARNING]: Tried to print a void return type from method {self.me.method_name}'
+                        value = f'[WARNING]: Tried to print a void return type from method {self.methodName}'
                     else:
                         value = value
 
