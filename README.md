@@ -8,7 +8,7 @@ One small advantage of this is that this skips the need of downloading a JDK or 
 
 [Java SE Docs](https://docs.oracle.com/javase/8/docs/api/) was used to help create this
 
-There is no AST for this, I used (smart + efficient) hard coded steps to evaluate statements. However, this may result in some weird parsing errors. Please make sure you include semicolons on the end of every line, since many expressions depend heavily on it to find the end of the statement. 
+There is no AST for this, I used some pretty efficient hard coded steps to evaluate statements. However, this may result in some weird parsing errors. Please make sure you include semicolons on the end of every line, since many expressions depend heavily on it to find the end of the statement. 
 
 # Supports
 P-JDK supports all basic Java syntax (and fully replicates it), like defining classes:
