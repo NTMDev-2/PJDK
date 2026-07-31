@@ -8,5 +8,6 @@ subprocess
 traceback
 time
 json
+copy
 
 Packages that require pip:
