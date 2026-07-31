@@ -1,4 +1,10 @@
 # mypy: ignore-errors
+# type: ignore
+# ISSUES:
+# 1. Can't do this: Box<Box> a = new Box<>(new Box<String>);
+# 2. Needs to type check T of Box<T> (example)
+# 3. 
+
 import builtins
 import operator as pyop
 import struct
@@ -17,7 +23,7 @@ ENTRY = {'entryClass': '', 'entryMethod': ENTRY_METHOD_NAME}
 nextHeapId = 0
 heap: dict = {}
 
-memory: dict = {'Object': {'name': 'Object', 'methods': {}, 'fields': {}, 'package': 'MainRuntime'}}
+memory: dict = {'Object': {'name': 'Object', 'methods': {}, 'fields': {}, 'package': 'MainRuntime', 'typeParams': [], 'abstract': False}}
 interfaces: dict = {}
 
 class Numeric:
@@ -121,7 +127,7 @@ class Void(Returnable):
     def __repr__(self):
         return "Void"
 
-class NO_INIT:
+class NO_INIT: # Marker
     pass
 class Null:
     def __repr__(self):
@@ -173,7 +179,13 @@ def isAllowedAtThisScope(modifier: str, thisScope: str, packageScope: str = 'thi
     else:
         raise PermissionError(f'Attempted to access item "{item}" without sufficient permission')
 def isConsistentTypes(thisType: object, otherType: object) -> bool:
+    if isinstance(thisType, PrimitiveArray) and isinstance(otherType, PrimitiveArrayWrapper):
+        isConsistentTypes(thisType.listType, otherType.getArrayType())
+        arrayTypesEqual(thisType, otherType)
+
     if isinstance(otherType, ClassType) and otherType.get() == 'Object':
+        return True
+    if isinstance(thisType, ClassType) and thisType.get() == 'Object':
         return True
     if otherType is NO_INIT or thisType is NO_INIT or isinstance(otherType, NO_INIT) or isinstance(thisType, NO_INIT):
         return True
@@ -182,7 +194,7 @@ def isConsistentTypes(thisType: object, otherType: object) -> bool:
             return True
         elif issubclass(thisType, Nullable):
             return True
-    if (isinstance(thisType, Null) or thisType is Null) and issubclass(otherType, Nullable):
+    if (isinstance(thisType, Null) or thisType is Null) and issubclass(type(otherType), Nullable):
         if type(otherType) is ClassType:  # noqa: SIM114
             return True
         elif issubclass(otherType, Nullable):
@@ -193,11 +205,10 @@ def isConsistentTypes(thisType: object, otherType: object) -> bool:
             if not (otherType.getClass() == thisType.className or thisType.className in getHierarchyOfClass(otherType.getClass())):
                 raise TypeError(f'Class {otherType.getClass()} does not support class {thisType.className}')
             return True 
-    elif isinstance(thisType, ObjectReference) or thisType is ObjectReference:
-        if isinstance(otherType, ClassType) or otherType is ClassType:
-            if not (thisType.getClass() == otherType.className or otherType.className in getHierarchyOfClass(thisType.getClass())):
-                raise TypeError(f'Class {otherType.className} does not support class {thisType.getClass()}')
-            return True
+    elif (isinstance(thisType, ObjectReference) or thisType is ObjectReference) and (isinstance(otherType, ClassType) or otherType is ClassType):
+        if not (thisType.getClass() == otherType.className or otherType.className in getHierarchyOfClass(thisType.getClass())):
+            raise TypeError(f'Class {otherType.className} does not support class {thisType.getClass()}')
+        return True
     if thisType is otherType:
         return True
     if not isinstance(thisType, type):
@@ -213,6 +224,25 @@ def isConsistentTypes(thisType: object, otherType: object) -> bool:
         raise TypeError(f'Type {otherType.__name__} does not support type {thisType.__name__}')
     
     raise TypeError(f'Type {otherType.__name__} does not support type {thisType.__name__}')
+def isConsistentGenericTypes(expected_type: str, actual_type: str, type_params: dict[str, str] = None) -> bool: # Verifies that the generic type provided is consistent with the generic type stated
+    # Simple check: Does not support wildcards or type parameters, e.g. <T extends Foo> or <? extends Foo>
+    didPass = False
+    if type_params is None:
+        type_params = {}
+    
+    if expected_type in type_params:
+        didPass = True
+    if actual_type == expected_type:
+        didPass = True
+    try:
+        hierarchy = getHierarchyOfClass(actual_type)
+        didPass = expected_type in hierarchy
+    except NameError:
+        didPass = False
+
+    if not didPass:
+        raise TypeError(f'{expected_type} does not support {actual_type} in this generic type expression')
+
 def hasCheckedAllExeceptions(ownerName: str, thisMethodName: str, ownerAsInterface: bool = False):
     if not ownerAsInterface:
         source = memory
@@ -343,7 +373,7 @@ def isValidReturnType(selftype: object):
 def isChangeable(data: dict):
     if data['final']:
         raise Exception(f'This variable "{data['name']}" is final, and therefore cannot be modified')
-def createClass(className: str, classModifier: str, package: str, superClass: ClassReference = ClassReference('Object'), implements: list[str] = [], isAbstract: bool = False):
+def createClass(className: str, classModifier: str, package: str, superClass: ClassReference = ClassReference('Object'), implements: list[str] = [], isAbstract: bool = False, typeParams: list[str] | None = None):
     isValidModifier(classModifier)
     if className in memory:
         raise NameError(f"Class '{className}' is already defined")
@@ -398,9 +428,10 @@ def createClass(className: str, classModifier: str, package: str, superClass: Cl
         'methods': inherited,
         'fields': inherited_fields,
         'package': package,
-        'abstract': isAbstract
+        'abstract': isAbstract,
+        'typeParams': list(typeParams) if typeParams else []
     }
-def createMethod(thisClass: ClassReference, methodName: str, methodModifier: str, methodReturnType: object, package: str, isStatic: bool = False, methodArgs: dict = {}, throws: list = [], isAbstract: bool = False):
+def createMethod(thisClass: ClassReference, methodName: str, methodModifier: str, methodReturnType: object, package: str, isStatic: bool = False, methodArgs: dict = {}, throws: list = [], isAbstract: bool = False, usesGenericType: str = ''):
     isValidReturnType(methodReturnType)
     isValidModifier(methodModifier)
     classInfo = memory[thisClass.getClass()]
@@ -432,7 +463,8 @@ def createMethod(thisClass: ClassReference, methodName: str, methodModifier: str
             'args': methodArgs,
             'throws': throws,
             'package': package,
-            'abstract': isAbstract
+            'abstract': isAbstract,
+            'specialGeneric': usesGenericType
         }
         existing.append(new_method)
         methodInfo[methodName] = existing
@@ -445,7 +477,8 @@ def createMethod(thisClass: ClassReference, methodName: str, methodModifier: str
             'args': methodArgs,
             'throws': throws,
             'package': package,
-            'abstract': isAbstract
+            'abstract': isAbstract,
+            'specialGeneric': usesGenericType
         }
     
     if isStatic:
@@ -456,7 +489,8 @@ def createMethod(thisClass: ClassReference, methodName: str, methodModifier: str
             'returns': methodReturnType,
             'args': methodArgs,
             'package': package,
-            'abstract': isAbstract
+            'abstract': isAbstract,
+            'specialGeneric': usesGenericType
         }
 def createConstructor(className: str, modifier: str, package: str, body: str, args: dict = {}):
     isValidModifier(modifier)
@@ -764,27 +798,135 @@ class PrimitiveArrayWrapper(PrimitiveArray):
         self._type = _type
     def getArrayType(self):
         return self._type
+
+def getArrayBaseType(t: object) -> object:
+    while isinstance(t, PrimitiveArrayWrapper):
+        t = t.getArrayType()
+    return t
+def getArrayDepth(t: object) -> int:
+    depth = 0
+    while isinstance(t, PrimitiveArrayWrapper):
+        depth += 1
+        t = t.getArrayType()
+    return depth
+def arrayTypesEqual(a: object, b: object) -> bool:
+    """Structural equality for (possibly nested) array element types, since
+    PrimitiveArrayWrapper instances don't compare equal by identity/value by default."""
+    if isinstance(a, PrimitiveArrayWrapper) or isinstance(b, PrimitiveArrayWrapper):
+        if not (isinstance(a, PrimitiveArrayWrapper) and isinstance(b, PrimitiveArrayWrapper)):
+            return False
+        return arrayTypesEqual(a.getArrayType(), b.getArrayType())
+    if isinstance(a, ClassType) and isinstance(b, ClassType):
+        return a.className == b.className
+    return a == b
+def makeArrayType(baseType: object, dims: int) -> object:
+    t = baseType
+    for _ in range(dims):
+        t = PrimitiveArrayWrapper(t)
+    return t
+def parseArrayDimSuffix(lang: TokenSlice, pos: int) -> 'tuple[int, int]':
+    dims = 0
+    while pos + 1 < len(lang) and lang[pos].get()['type'] == 'LBRACKET' and lang[pos + 1].get()['type'] == 'RBRACKET':
+        dims += 1
+        pos += 2
+    return dims, pos
+def parseNewArraySizes(lang: TokenSlice, pos: int, me: 'StackFrame | None', methodArgs: list | None) -> 'tuple[list, int]':
+    sizes: list = []
+    while pos < len(lang) and lang[pos].get()['type'] == 'LBRACKET':
+        close = matchingBracket(lang, pos)
+        if close > pos + 1:
+            size_tokens = lang[pos + 1:close]
+            size_value = Expression.evaluate(me, methodArgs, size_tokens)
+            if not isinstance(size_value, Int):
+                raise RuntimeError("Array size must be an integer")
+            sizes.append(size_value.get())
+        else:
+            sizes.append(None)
+        pos = close + 1
+    return sizes, pos
+def allocateMultiArray(baseType: object, sizes: list, initial_values: 'list | None' = None) -> object:
+    if not sizes:
+        return default_value_for_type(baseType)
+    size = sizes[0]
+    rest = sizes[1:]
+    elemType = makeArrayType(baseType, len(rest))
+    if size is None:
+        return Null()
+    if initial_values is not None:
+        return newPrimitiveArray(elemType, len(initial_values), initial_values)
+    values = [allocateMultiArray(baseType, rest) for _ in range(size)] if rest else None
+    return newPrimitiveArray(elemType, size, values)
+def parseArrayInitializerList(lang: TokenSlice, pos: int, me: 'StackFrame | None', methodArgs: list | None,
+                               baseType: object, dims: int) -> 'tuple[list, int]':
+    """`pos` points at a '{'. Parses a brace initializer list -- nested one level per remaining
+    dimension when dims > 1 (e.g. '{{1,2},{3,4}}') -- and returns (element_values, position
+    right after the matching '}'). The returned elements are already coerced/wrapped to `baseType`
+    at depth (dims - 1)."""
+    if lang[pos].get()['type'] != 'START_DECLARATION':
+        raise SyntaxError("Expected '{' in array initializer")
+    close = matchingBrace(lang, pos)
+    pos += 1
+    values = []
+    while pos < close:
+        if lang[pos].get()['type'] == 'COMMA':
+            pos += 1
+            continue
+        if dims > 1 and lang[pos].get()['type'] == 'START_DECLARATION':
+            subVals, subEnd = parseArrayInitializerList(lang, pos, me, methodArgs, baseType, dims - 1)
+            childElemType = makeArrayType(baseType, dims - 2) if dims > 2 else baseType
+            values.append(newPrimitiveArray(childElemType, len(subVals), subVals))
+            pos = subEnd
+            continue
+        value_tokens = []
+        paren_depth = 0
+        brace_depth = 0
+        while pos < close:
+            t = lang[pos]
+            tt = t.get()['type']
+            if tt == 'COMMA' and paren_depth == 0 and brace_depth == 0:
+                break
+            if tt == 'LPAREN':
+                paren_depth += 1
+            elif tt == 'RPAREN':
+                paren_depth -= 1
+            elif tt == 'START_DECLARATION':
+                brace_depth += 1
+            elif tt == 'END_DECLARATION':
+                brace_depth -= 1
+            value_tokens.append(t)
+            pos += 1
+        if value_tokens:
+            val = Expression.evaluate(me, methodArgs, value_tokens)
+            values.append(coerceValue(val, baseType))
+    return values, close + 1
+
 class ArrayAssignment:
     @staticmethod
     def parse(lang: TokenSlice, tokPosition: int, elementTypeTok: str,
             me: StackFrame | None = None, methodArgs: list | None = None):
-        # <type>[<int?>] <name> = new <type_consistent>[<int?>]<{args*}?>;
+        # <type>[<int?>][<int?>]... <name> = new <type_consistent>[<int?>][<int?>]...<{args*}?>;
         arrayType = parseTokenAsType(elementTypeTok)
         pos = tokPosition + 1
         if pos >= len(lang) or lang[pos].get()['type'] != 'LBRACKET':
             return None
 
-        close_bracket = matchingBracket(lang, pos)
+        # Consume one or more '[<size?>]' dimension groups for the declared type.
+        dim_sizes: list = []
+        while pos < len(lang) and lang[pos].get()['type'] == 'LBRACKET':
+            close_bracket = matchingBracket(lang, pos)
+            if close_bracket > pos + 1:
+                size_tokens = lang[pos + 1:close_bracket]
+                size_value = Expression.evaluate(me, methodArgs, size_tokens)
+                if not isinstance(size_value, Int):
+                    raise RuntimeError("Array size must be an integer")
+                dim_sizes.append(size_value.get())
+            else:
+                dim_sizes.append(None)
+            pos = close_bracket + 1
+        dims = len(dim_sizes)
+        declared_size = dim_sizes[0]
+        declaredType = makeArrayType(arrayType, dims)
 
-        declared_size = None
-        if close_bracket > pos + 1:
-            size_tokens = lang[pos + 1:close_bracket]
-            size_value = Expression.evaluate(me, methodArgs, size_tokens)
-            if not isinstance(size_value, Int):
-                raise RuntimeError("Array size must be an integer")
-            declared_size = size_value.get()
-
-        pos = close_bracket + 1
         if pos >= len(lang) or lang[pos].get()['type'] != 'IDENTIFIER':
             raise SyntaxError("Expected identifier after array type")
 
@@ -795,8 +937,9 @@ class ArrayAssignment:
             raise SyntaxError("Unexpected end of tokens in array declaration")
 
         if lang[pos].get()['type'] == 'SEMICOLON':
-            array_value = newPrimitiveArray(arrayType, declared_size if declared_size is not None else 0)
-            return var_name, arrayType, array_value, pos + 1
+            alloc_sizes = [s if s is not None else 0 for s in dim_sizes]
+            array_value = allocateMultiArray(arrayType, alloc_sizes)
+            return var_name, declaredType, array_value, pos + 1
 
         if lang[pos].get()['type'] != 'ASSIGN':
             raise SyntaxError("Expected '=' or ';' after array name")
@@ -820,65 +963,29 @@ class ArrayAssignment:
             
             if pos >= len(lang) or lang[pos].get()['type'] != 'LBRACKET':
                 raise SyntaxError("Expected '[' after array type")
-            pos += 1
-            
-            size_value = None
-            if lang[pos].get()['type'] != 'RBRACKET':
-                size_tokens = []
-                while pos < len(lang) and lang[pos].get()['type'] != 'RBRACKET':
-                    size_tokens.append(lang[pos])
-                    pos += 1
-                if pos >= len(lang) or lang[pos].get()['type'] != 'RBRACKET':
-                    raise SyntaxError("Expected ']' after array size")
-                size_value = Expression.evaluate(me, methodArgs, size_tokens)
-                if not isinstance(size_value, Int):
-                    raise RuntimeError("Array size must be an integer")
-            pos += 1  # Skip ']'
-            
-            actual_size = size_value.get() if size_value is not None else 0
+
+            new_sizes, pos = parseNewArraySizes(lang, pos, me, methodArgs)
+            new_dims = len(new_sizes)
+            actual_size = new_sizes[0] if new_sizes[0] is not None else 0
             
             # Check for array initializer
             if pos < len(lang) and lang[pos].get()['type'] == 'START_DECLARATION':
-                # { values }
-                pos += 1  # Skip '{'
-                values = []
-                while pos < len(lang) and lang[pos].get()['type'] != 'END_DECLARATION':
-                    if lang[pos].get()['type'] == 'COMMA':
-                        pos += 1
-                        continue
-                    value_tokens = []
-                    paren_depth = 0
-                    while pos < len(lang):
-                        t = lang[pos]
-                        if t.get()['type'] == 'END_DECLARATION' and paren_depth == 0:
-                            break
-                        if t.get()['type'] == 'COMMA' and paren_depth == 0:
-                            break
-                        if t.get()['type'] == 'LPAREN':
-                            paren_depth += 1
-                        elif t.get()['type'] == 'RPAREN':
-                            paren_depth -= 1
-                        value_tokens.append(t)
-                        pos += 1
-                    if value_tokens:
-                        val = Expression.evaluate(me, methodArgs, value_tokens)
-                        # For class types, we need to handle ObjectReferences properly
-                        if isinstance(element_type, ClassType):
-                            if isinstance(val, ObjectReference):
-                                # Check if the object is of the right type
-                                val_class = val.getClass()
-                                if val_class != element_type.className and element_type.className not in getHierarchyOfClass(val_class):
-                                    raise TypeError(f"Cannot assign {val_class} to array of {element_type.className}")
-                            else:
-                                raise TypeError(f"Expected ObjectReference, got {type(val)}")
-                        values.append(coerceValue(val, element_type))
-                pos += 1
-                
-                if size_value is not None and len(values) != actual_size:
+                values, pos = parseArrayInitializerList(lang, pos, me, methodArgs, element_type, new_dims)
+                if isinstance(element_type, ClassType):
+                    for val in values if new_dims == 1 else []:
+                        if isinstance(val, ObjectReference):
+                            val_class = val.getClass()
+                            if val_class != element_type.className and element_type.className not in getHierarchyOfClass(val_class):
+                                raise TypeError(f"Cannot assign {val_class} to array of {element_type.className}")
+                        elif not isinstance(val, Null):
+                            raise TypeError(f"Expected ObjectReference, got {type(val)}")
+
+                if new_sizes[0] is not None and len(values) != actual_size:
                     raise RuntimeError(f"Array size mismatch: declared {actual_size}, got {len(values)} elements")
-                array_value = newPrimitiveArray(element_type, len(values), values)
+                elemType = makeArrayType(element_type, new_dims - 1) if new_dims > 1 else element_type
+                array_value = newPrimitiveArray(elemType, len(values), values)
             else:
-                array_value = newPrimitiveArray(element_type, actual_size)
+                array_value = allocateMultiArray(element_type, new_sizes)
             
             while pos < len(lang) and lang[pos].get()['type'] != 'SEMICOLON':
                 pos += 1
@@ -886,7 +993,7 @@ class ArrayAssignment:
                 raise SyntaxError("Expected ';' after array initialization")
             pos += 1
             
-            return var_name, arrayType, array_value, pos
+            return var_name, declaredType, array_value, pos
         else:
             rhs_tokens = []
             while pos < len(lang) and lang[pos].get()['type'] != 'SEMICOLON':
@@ -902,7 +1009,7 @@ class ArrayAssignment:
                 raise RuntimeError(
                     f"Array size mismatch for '{var_name}': declared size {declared_size}, got {array_value.size}"
                 )
-            return var_name, arrayType, array_value, pos
+            return var_name, declaredType, array_value, pos
 
 class EvalTokens:
     TOKENS = {
@@ -982,6 +1089,7 @@ class EvalTokens:
         '|': 'BIT_OR',
         '^': 'BIT_XOR',
         '~': 'BIT_NOT',
+        '?': 'QUESTION',
         #UNARY_MINUS
     }
     TWO_CHAR_OP = {
@@ -1033,22 +1141,28 @@ class Token:
     @staticmethod
     def splitArgs(tokens: list["Token"]) -> list[list["Token"]]:
         # Splits a token slice
+        if not tokens:
+            return []
+        
         groups = []
         current: list = []
         depth = 0
+        
         for tok in tokens:
             t = tok.get()['type']
             if t == 'LPAREN': 
                 depth += 1
-            if t == 'RPAREN': 
+            elif t == 'RPAREN': 
                 depth -= 1
-            if t == 'COMMA' and depth == 0:
+            elif t == 'COMMA' and depth == 0:
                 groups.append(current)
                 current = []
-            else:
-                current.append(tok)
+                continue
+            current.append(tok)
+        
         if current: 
             groups.append(current)
+        
         return [g for g in groups if g]
 class Intepreter:
     def __init__(self, fileCode: str):
@@ -1333,7 +1447,77 @@ EvalTokens.TWO_CHAR_OP['<='], EvalTokens.SINGLE_CHAR_OP['!'], EvalTokens.TWO_CHA
 LOOP_ACTIONS = [EvalTokens.TOKENS['break'], EvalTokens.TOKENS['continue']]
 RETURN_TYPE_STR = ('String', 'char', 'byte', 'short', 'int', 'long')
 
-def parseTokenAsType(token: str, acceptVoid: bool = False, wantExact: bool = False) -> object:
+def parseGenericTypeParams(lang: TokenSlice, ltIdx: int) -> 'tuple[int, list[str]]':
+    if lang[ltIdx].get()['val'] != '<':
+        raise SyntaxError('Expected "<" to begin type parameter list')
+    names: list[str] = []
+    i = ltIdx + 1
+    expectName = True
+    while i < len(lang):
+        val = lang[i].get()['val']
+        typ = lang[i].get()['type']
+        if val == '>':
+            if expectName:
+                raise SyntaxError('Malformed type parameter list: expected a name before ">"')
+            return i, names
+        if expectName:
+            if typ != 'IDENTIFIER':
+                raise SyntaxError(f"Expected a type parameter name, got '{val}' "
+                                   f"(bounds and wildcards are not supported in a type parameter list yet)")
+            if val in names:
+                raise SyntaxError(f"Duplicate type parameter '{val}'")
+            names.append(val)
+            expectName = False
+        else:
+            if val != ',':
+                raise SyntaxError(f"Expected ',' or '>' in type parameter list, got '{val}'")
+            expectName = True
+        i += 1
+    raise SyntaxError('Unterminated type parameter list, expected matching ">"')
+def parseGenericTypeValue(lang: TokenSlice, startIdx: int) -> tuple[int, str, list]:
+    i = startIdx
+    
+    if i >= len(lang) or lang[i].get()['type'] != 'IDENTIFIER':
+        raise SyntaxError("Expected class name in generic type")
+    base_name = lang[i].get()['val']
+    i += 1
+    
+    type_args = []
+    if i < len(lang) and lang[i].get()['val'] == '<':
+        i += 1  # Skip <
+        depth = 1
+        
+        # Empty generic type '<>'
+        if i < len(lang) and lang[i].get()['val'] == '>':
+            i += 1  # Skip >
+            return i, base_name, type_args
+        
+        # type arguments
+        while i < len(lang) and depth > 0:
+            val = lang[i].get()['val']
+            if val == '<':
+                depth += 1
+            elif val == '>':
+                depth -= 1
+                if depth == 0:
+                    i += 1
+                    break
+            elif val == ',' and depth == 1:
+                pass
+            else:
+                if lang[i].get()['type'] == 'IDENTIFIER':
+                    type_args.append(lang[i].get()['val'])
+            i += 1
+            
+        if depth != 0:
+            raise SyntaxError("Unmatched '<' in generic type")
+    
+    return i, base_name, type_args
+def typeParamsOf(className: 'str | None') -> set:
+    if not className or className not in memory:
+        return set()
+    return set(memory[className].get('typeParams', []))
+def parseTokenAsType(token: str, acceptVoid: bool = False, wantExact: bool = False, typeParams: 'set[str] | None' = None) -> object:
     match token:
         case 'IDENTIFIER':
             return type(resolveOperand(None, None, token))
@@ -1362,6 +1546,10 @@ def parseTokenAsType(token: str, acceptVoid: bool = False, wantExact: bool = Fal
         case 'STRING_TYPE' | 'String' | 'STRING_LITERAL':
             return String
         case _:
+            if typeParams and token in typeParams:
+                if wantExact:
+                    return ClassType('Object')
+                return ClassType
             if isClass(token):
                 if wantExact:
                     return ClassType(token)
@@ -1376,6 +1564,8 @@ def anyOverload(method_entry: object):
 
 def argMatchesExpectedType(arg: object, expected_type: object) -> bool:
     if isinstance(expected_type, ClassType):
+        if expected_type.get() == 'Object':
+            return True
         if not isinstance(arg, ObjectReference):
             return False
         arg_class = arg.getClass()
@@ -1383,7 +1573,7 @@ def argMatchesExpectedType(arg: object, expected_type: object) -> bool:
     if isinstance(expected_type, PrimitiveArrayWrapper):
         if not isinstance(arg, PrimitiveArray):
             return False
-        return arg.listType == expected_type.getArrayType()
+        return arrayTypesEqual(arg.listType, expected_type.getArrayType())
     return isinstance(arg, expected_type)
 def resolveOverload(method_entry: object, args: list):
     if not isinstance(method_entry, list):
@@ -1449,12 +1639,57 @@ def getArgValById(args: list, nameOfArg: str, methodName: str, className: str):
         raise RuntimeError(f'Method {methodName} of class {className} got too little arguments')
     else:
         return args[argPos.index(nameOfArg)]
+def findTernarySplit(tokens: TokenSlice) -> 'tuple[int, int] | None':
+    depth = 0
+    qIdx = None
+    for i, tok in enumerate(tokens):
+        t = tok.get()['type']
+        if t in ('LPAREN', 'LBRACKET'):
+            depth += 1
+        elif t in ('RPAREN', 'RBRACKET'):
+            depth -= 1
+        elif t == 'QUESTION' and depth == 0:
+            qIdx = i
+            break
+    if qIdx is None:
+        return None
+
+    depth = 0
+    ternaryDepth = 1
+    for j in range(qIdx + 1, len(tokens)):
+        t = tokens[j].get()['type']
+        if t in ('LPAREN', 'LBRACKET'):
+            depth += 1
+        elif t in ('RPAREN', 'RBRACKET'):
+            depth -= 1
+        elif depth == 0 and t == 'QUESTION':
+            ternaryDepth += 1
+        elif depth == 0 and t == 'COLON':
+            ternaryDepth -= 1
+            if ternaryDepth == 0:
+                return qIdx, j
+    raise SyntaxError("Malformed ternary expression: expected matching ':' for '?'")
+
 def toRPN(tokens: TokenSlice) -> TokenSlice:
+    ternarySplit = findTernarySplit(tokens)
+    if ternarySplit is not None:
+        qIdx, colonIdx = ternarySplit
+        condTokens = tokens[:qIdx]
+        trueTokens = tokens[qIdx + 1:colonIdx]
+        falseTokens = tokens[colonIdx + 1:]
+        if not condTokens or not trueTokens or not falseTokens:
+            raise SyntaxError("Malformed ternary expression: missing condition, true, or false branch")
+        marker = Token('TERNARY', '?:', tokens[qIdx].line, tokens[qIdx].column, tokens[qIdx].truePos)
+        return toRPN(condTokens) + toRPN(trueTokens) + toRPN(falseTokens) + [marker]
+
     output: list = []
     opStack: list = []
     UNARY_OPS = {'LOGICAL_NOT', 'INC', 'DEC'}
     
-    for i, tok in enumerate(tokens):
+    i = 0
+    n = len(tokens)
+    while i < n:
+        tok = tokens[i]
         t = tok.get()['type']
         if t in ('RESOLVED_VALUE', 'INT_LITERAL', 'LONG_LITERAL', 'BYTE_LITERAL',
                  'SHORT_LITERAL', 'FLOAT_LITERAL', 'DOUBLE_LITERAL', 'STRING_LITERAL', 'CHAR_LITERAL',
@@ -1463,18 +1698,32 @@ def toRPN(tokens: TokenSlice) -> TokenSlice:
                 output.append(Null())
             else:
                 output.append(tok)
+            i += 1
             continue
         
         if t == 'LPAREN':
-            opStack.append(tok)
+            # Recursively resolve the parenthesized subexpression on its own so that
+            # a ternary operator nested inside parentheses is handled correctly,
+            # then splice its RPN output in as a single unit (an operand).
+            depth = 1
+            j = i + 1
+            while j < n:
+                tt = tokens[j].get()['type']
+                if tt == 'LPAREN':
+                    depth += 1
+                elif tt == 'RPAREN':
+                    depth -= 1
+                    if depth == 0:
+                        break
+                j += 1
+            if depth != 0:
+                raise SyntaxError('Mismatched parentheses')
+            inner = tokens[i + 1:j]
+            output.extend(toRPN(inner))
+            i = j + 1
             continue
         if t == 'RPAREN':
-            while opStack and opStack[-1].get()['type'] != 'LPAREN':
-                output.append(opStack.pop())
-            if not opStack:
-                raise SyntaxError('Mismatched parentheses')
-            opStack.pop()
-            continue
+            raise SyntaxError('Mismatched parentheses')
         if t == 'MINUS':
             is_unary = (i == 0) or (tokens[i-1].get()['type'] in 
                 ('LPAREN', 'PLUS', 'MINUS', 'MULTIPLY', 'DIVIDE', 'MODULO',
@@ -1485,17 +1734,20 @@ def toRPN(tokens: TokenSlice) -> TokenSlice:
                 while opStack and opStack[-1].get()['type'] in ('LOGICAL_NOT', 'INC', 'DEC', 'UNARY_MINUS'):
                     output.append(opStack.pop())
                 opStack.append(Token('UNARY_MINUS', '-', tok.line, tok.column, tok.truePos))
+                i += 1
                 continue
         if t in UNARY_OPS:
             while opStack and opStack[-1].get()['type'] in UNARY_OPS:
                 output.append(opStack.pop())
             opStack.append(tok)
+            i += 1
             continue
         if t in EvalTokens.PRECEDENCE:
             while (opStack and opStack[-1].get()['type'] in EvalTokens.PRECEDENCE and
                    EvalTokens.PRECEDENCE[opStack[-1].get()['type']] >= EvalTokens.PRECEDENCE[t]):
                 output.append(opStack.pop())
             opStack.append(tok)
+            i += 1
             continue
         raise SyntaxError(f'Unexpected token in expression: {t} ({tok.get()["val"]})')
     while opStack:
@@ -1704,44 +1956,69 @@ def collapseTokenSlice(me: StackFrame | None, methodArgs: list | None, tokens: T
                 element_type_token = tokens[i + 1].get()['val']
                 element_type = parseTokenAsType(element_type_token)
 
-                close_bracket = matchingBracket(tokens, i + 2)
+                new_sizes, next_idx = parseNewArraySizes(tokens, i + 2, me, methodArgs)
+                new_dims = len(new_sizes)
+                declared_size = new_sizes[0]
 
-                declared_size = None
-                if close_bracket > i + 3:
-                    size_tokens = tokens[i + 3:close_bracket]
-                    size_value = Expression.evaluate(me, methodArgs, size_tokens)
-                    if not isinstance(size_value, Int):
-                        raise RuntimeError("Array size must be an integer")
-                    declared_size = size_value.get()
-
-                next_idx = close_bracket + 1
-
-                if next_idx < len(tokens) and tokens[next_idx].get()['type'] == 'LBRACE':
-                    close_brace = matchingBrace(tokens, next_idx)
-                    elem_groups = Token.splitArgs(tokens[next_idx + 1:close_brace])
-                    initial_values = []
-                    for group in elem_groups:
-                        if not group:
-                            continue
-                        val = Expression.evaluate(me, methodArgs, group)
-                        initial_values.append(convertValue(val, element_type))
-
-                    size = declared_size if declared_size is not None else len(initial_values)
-                    if len(initial_values) > size:
+                if next_idx < len(tokens) and tokens[next_idx].get()['type'] == 'START_DECLARATION':
+                    values, end_idx = parseArrayInitializerList(tokens, next_idx, me, methodArgs, element_type, new_dims)
+                    size = declared_size if declared_size is not None else len(values)
+                    if len(values) > size:
                         raise RuntimeError(
-                            f"Array initializer has {len(initial_values)} elements, exceeds declared size {size}"
+                            f"Array initializer has {len(values)} elements, exceeds declared size {size}"
                         )
-                    array_obj = newPrimitiveArray(element_type, size, initial_values)
-                    i = close_brace + 1
+                    elemType = makeArrayType(element_type, new_dims - 1) if new_dims > 1 else element_type
+                    array_obj = newPrimitiveArray(elemType, size, values)
+                    i = end_idx
                 else:
-                    size = declared_size if declared_size is not None else 0
-                    array_obj = newPrimitiveArray(element_type, size)
+                    array_obj = allocateMultiArray(element_type, new_sizes)
                     i = next_idx
 
                 out.append(Token.wrap(array_obj))
                 continue
+            elif i + 2 < len(tokens) and tokens[i + 2].get()['val'] == '<':
+                class_name = tokens[i + 1].get()['val']
+                pos = i + 2  # Position at '<'
+                
+                depth = 0
+                while pos < len(tokens):
+                    val = tokens[pos].get()['val']
+                    if val == '<':
+                        depth += 1
+                    elif val == '>':
+                        depth -= 1
+
+                    if depth == 0:
+                        break
+                    pos += 1
+                if depth != 0:
+                    raise SyntaxError("Unmatched '<' in generic type")
+                if pos < len(tokens) and tokens[pos+1].get()['type'] == 'LPAREN':
+                    openParen = pos
+                    closeParen = matchingParen(tokens, openParen)
+                    
+                    arg_tokens = tokens[openParen + 1 : closeParen][1:]
+                    if arg_tokens:
+                        arg_groups = Token.splitArgs(arg_tokens)
+                        evaled_args = [Expression.evaluate(me, methodArgs, group) for group in arg_groups]
+                        obj = newObject(class_name, evaled_args, me.class_name if me else 'MainRuntime')
+                    else:
+                        obj = newObject(class_name, callerClass=me.class_name if me else 'MainRuntime')
+                    
+                    out.append(Token.wrap(obj))
+                    i = closeParen + 1
+                    continue
+                else:
+                    raise SyntaxError(f"Expected '(' after generic type in new expression for class '{class_name}'")
+            
+            # Regular object creation: new ClassName()
             else:
                 className = tokens[i+1].get()['val']
+                
+                # Make sure we have a '(' after the class name
+                if i + 2 >= len(tokens) or tokens[i + 2].get()['type'] != 'LPAREN':
+                    raise SyntaxError(f"Expected '(' after class name in new expression for class '{className}'")
+                
                 openParen = i + 2
                 closeParen = matchingParen(tokens, openParen)
                 
@@ -1749,10 +2026,9 @@ def collapseTokenSlice(me: StackFrame | None, methodArgs: list | None, tokens: T
                 if arg_tokens:
                     arg_groups = Token.splitArgs(arg_tokens)
                     evaled_args = [Expression.evaluate(me, methodArgs, group) for group in arg_groups]
-                    
-                    obj = newObject(className, evaled_args, me.class_name)
+                    obj = newObject(className, evaled_args, me.class_name if me else 'MainRuntime')
                 else:
-                    obj = newObject(className, callerClass=me.class_name)
+                    obj = newObject(className, callerClass=me.class_name if me else 'MainRuntime')
                 
                 out.append(Token.wrap(obj))
                 i = closeParen + 1
@@ -1791,17 +2067,26 @@ def collapseTokenSlice(me: StackFrame | None, methodArgs: list | None, tokens: T
             continue
         elif t == 'IDENTIFIER' and i + 1 < len(tokens) and tokens[i + 1].get()['type'] == 'LBRACKET':
             array_name = tokens[i].get()['val']
-            close_idx = matchingBracket(tokens, i + 1)
-            index_tokens = tokens[i + 2 : close_idx]
-            index_value = Expression.evaluate(me, methodArgs, index_tokens)
-            array_obj = resolveValue(me, methodArgs, tokens[i])
-            
-            if not isinstance(array_obj, PrimitiveArray):
-                raise RuntimeError(f"'{array_name}' is not an array")
-            
-            element = array_obj.get(index_value.get())
+            element = resolveValue(me, methodArgs, tokens[i])
+            close_idx = i + 1
+            while close_idx < len(tokens) and tokens[close_idx].get()['type'] == 'LBRACKET':
+                bracket_close = matchingBracket(tokens, close_idx)
+                index_tokens = tokens[close_idx + 1 : bracket_close]
+                index_value = Expression.evaluate(me, methodArgs, index_tokens)
+                if not isinstance(element, PrimitiveArray):
+                    raise RuntimeError(f"'{array_name}' is not an array")
+                if not isinstance(index_value, Int):
+                    raise RuntimeError("Array index must be an integer")
+                element = element.get(index_value.get())
+                close_idx = bracket_close + 1
+            if close_idx + 1 < len(tokens) and tokens[close_idx].get()['type'] == 'DOT' \
+                    and tokens[close_idx + 1].get()['type'] == 'IDENTIFIER' and tokens[close_idx + 1].get()['val'] == 'length':
+                if not isinstance(element, PrimitiveArray):
+                    raise RuntimeError(f"'{array_name}' is not an array")
+                element = Int(element.size)
+                close_idx += 2
             out.append(Token.wrap(element))
-            i = close_idx + 1
+            i = close_idx
             continue
                 # In collapseTokenSlice, around line 1445-1455:
         elif t == 'IDENTIFIER' and i + 1 < len(tokens) and tokens[i+1].get()['type'] == 'LPAREN':
@@ -2041,12 +2326,10 @@ def convertValue(value: object, target_type: object, allowLossy: bool = False) -
     if isinstance(target_type, ClassType) and isinstance(value, ObjectReference):
         return value
     if target_type is String or target_type == String:
-        if isinstance(value, (Numeric, Bool, Char)):
-            return String(str(value.get()))
-        elif isinstance(value, ObjectReference):
-            return String(str(value))
+        if isinstance(value, String):
+            return value
         else:
-            return String(str(value))
+            raise TypeError(f"Cannot convert {type(value).__name__} to String")
     if type(value) is Null:           
         return type(target_type)(Null())
     raise TypeError(f"Cannot convert {type(value).__name__} to {target_type.__name__}")
@@ -2200,6 +2483,14 @@ class Expression:
                 a = stack.pop()
                 stack.append(a)
                 continue
+            if t == 'TERNARY':
+                falseVal = stack.pop()
+                trueVal = stack.pop()
+                cond = stack.pop()
+                if not isinstance(cond, Bool):
+                    raise TypeError('Condition of ternary operator (?:) must be a boolean expression')
+                stack.append(trueVal if cond.get() else falseVal)
+                continue
             if t in EvalTokens.PRECEDENCE:
                 b = stack.pop()
                 a = stack.pop()
@@ -2338,7 +2629,7 @@ class Return:
         me.returnValue = coerceValue(retValue, thisMethodInfo['returns'])
 class LocalAssignment:
     @staticmethod
-    def assign(me: StackFrame, methodArgs: list, assignArgs: list, valueByToken: TokenSlice, assignToClassType: ClassReference | None = None):
+    def assign(me: StackFrame, methodArgs: list, assignArgs: list, valueByToken: TokenSlice, assignToClassType: ClassReference | None = None): 
         valType = parseTokenAsType(assignArgs[0])
         val = Expression.evaluate(me, methodArgs, valueByToken)
 
@@ -2365,6 +2656,65 @@ class FieldAssignment:
     @staticmethod
     def evaluate(valueByToken: TokenSlice) -> Returnable:
         return Expression.evaluate(None, None, valueByToken)
+def resolveGenericReferences(className: str, genericTypeArgs: list) -> dict:
+    if className not in memory:
+        return None
+    
+    class_info = memory[className]
+    type_params = class_info.get('typeParams', [])
+    
+    # Create mapping
+    type_map = {}
+    for i, param in enumerate(type_params):
+        if i < len(genericTypeArgs):
+            if isinstance(genericTypeArgs[i], ClassType):
+                type_map[param] = genericTypeArgs[i].className
+            elif isinstance(genericTypeArgs[i], str):
+                type_map[param] = genericTypeArgs[i]
+            else:
+                type_map[param] = 'Object'
+    
+    if not type_map and type_params:
+        for param in type_params:
+            type_map[param] = 'Object'
+    
+    # Copy
+    import copy
+    resolved_class = copy.deepcopy(class_info)
+    
+    # Resolve fields
+    for _, field_info in resolved_class['fields'].items():
+        field_type = field_info['type']
+        if isinstance(field_type, ClassType):
+            if field_type.className in type_map:
+                field_info['type'] = ClassType(type_map[field_type.className])
+        elif isinstance(field_type, PrimitiveArrayWrapper):
+            inner_type = field_type.getArrayType()
+            if isinstance(inner_type, ClassType) and inner_type.className in type_map:
+                field_info['type'] = PrimitiveArrayWrapper(ClassType(type_map[inner_type.className]))
+    
+    # Resolve methods
+    for _, method_entry in resolved_class['methods'].items():
+        methods = method_entry if isinstance(method_entry, list) else [method_entry]
+        for method_info in methods:
+            if isinstance(method_info['returns'], ClassType):
+                if method_info['returns'].className in type_map:
+                    method_info['returns'] = ClassType(type_map[method_info['returns'].className])
+            elif isinstance(method_info['returns'], PrimitiveArrayWrapper):
+                inner_type = method_info['returns'].getArrayType()
+                if isinstance(inner_type, ClassType) and inner_type.className in type_map:
+                    method_info['returns'] = PrimitiveArrayWrapper(ClassType(type_map[inner_type.className]))
+            
+            for arg_name, arg_type in method_info['args'].items():
+                if isinstance(arg_type, ClassType):
+                    if arg_type.className in type_map:
+                        method_info['args'][arg_name] = ClassType(type_map[arg_type.className])
+                elif isinstance(arg_type, PrimitiveArrayWrapper):
+                    inner_type = arg_type.getArrayType()
+                    if isinstance(inner_type, ClassType) and inner_type.className in type_map:
+                        method_info['args'][arg_name] = PrimitiveArrayWrapper(ClassType(type_map[inner_type.className]))
+
+    return resolved_class
 class Method:
     def __init__(self):
         self.me = currentFrame()
@@ -2504,40 +2854,102 @@ class Method:
         tok_val = token.get()['val']
 
         isClassAssign = isClass(tok_val)
+        isTypeParamAssign = not isClassAssign and tok_val in typeParamsOf(self.me.class_name)
 
-        if (tok_type in RETURN_TYPES or isClassAssign) and (self.next(by=2) == '=' or self.next(by=2) == ';'): # Local assignment
-            var_name = self.next()
-            self.tokPosition += 2
+        isClassAssignWithGenerics = (tok_type == 'IDENTIFIER' and self.next() == '<' and self.before() != 'class')
+        try:
+            genericInfo = parseGenericTypeValue(self.lang, self.tokPosition)
+        except SyntaxError:
+            genericInfo = tuple()
+            isClassAssignWithGenerics = False
+
+        if ((tok_type in RETURN_TYPES or isClassAssign or isTypeParamAssign) and self.next(by=2) in ('=', ';', ',')) or isClassAssignWithGenerics: # Local assignment
+            
+            if isClassAssignWithGenerics:
+                end_pos, base_class, _ = parseGenericTypeValue(self.lang, self.tokPosition)
+                pos = end_pos
+                while pos < len(self.lang) and self.lang[pos].get()['type'] in ('NEWLINE', 'WHITESPACE'):
+                    pos += 1
+                self.tokPosition = pos
+                isClassAssign = True
+                tok_val = base_class
+            else:
+                self.tokPosition += 1
+            
+            var_names = []
+            while self.tokPosition < len(self.lang):
+                while self.tokPosition < len(self.lang) and self.lang[self.tokPosition].get()['type'] in ('NEWLINE', 'WHITESPACE'):
+                    self.tokPosition += 1
+                
+                if self.tokPosition >= len(self.lang):
+                    break
+                if self.lang[self.tokPosition].get()['type'] == 'IDENTIFIER':
+                    var_names.append(self.lang[self.tokPosition].get()['val'])
+                    self.tokPosition += 1
+                else:
+                    break
+                
+                if self.tokPosition < len(self.lang):
+                    if self.lang[self.tokPosition].get()['type'] == 'COMMA':
+                        self.tokPosition += 1
+                        continue
+                    elif self.lang[self.tokPosition].get()['type'] in ('SEMICOLON', 'ASSIGN'):
+                        break
+                    else:
+                        raise SyntaxError(f"Expected ',', ';', or '=' after variable name, got {self.lang[self.tokPosition].get()['type']}")
+            
             if self.tokPosition < len(self.lang) and self.lang[self.tokPosition].get()['type'] == 'ASSIGN':
-                self.tokPosition += 1  # Skip '='
+                self.tokPosition += 1
                 
                 rhs_tokens = []
-                while self.tokPosition < len(self.lang) and self.lang[self.tokPosition].get()['type'] != 'SEMICOLON':
-                    rhs_tokens.append(self.lang[self.tokPosition])
+                depth = 0
+                while self.tokPosition < len(self.lang):
+                    t = self.lang[self.tokPosition]
+                    tt = t.get()['type']
+                    
+                    if tt == 'SEMICOLON' and depth == 0:
+                        break
+                    if tt == 'LPAREN':
+                        depth += 1
+                    elif tt == 'RPAREN':
+                        depth -= 1
+                    rhs_tokens.append(t)
                     self.tokPosition += 1
                 
                 if self.tokPosition < len(self.lang) and self.lang[self.tokPosition].get()['type'] == 'SEMICOLON':
                     self.tokPosition += 1
                 else:
-                    raise SyntaxError("Expected ';' after variable declaration")
-                if isClassAssign:
-                    assignToClass = ClassReference(tok_val)
-                    LocalAssignment.assign(self.me, self.args, [tok_val, var_name], rhs_tokens, assignToClass)
-                else:
-                    LocalAssignment.assign(self.me, self.args, [tok_val, var_name], rhs_tokens)
-            elif self.next(0) == ';':
-                self.tokPosition += 1  # Skip ';'
-                if isClassAssign:
-                    self.me.setLocal(var_name, ClassType(tok_val), NO_INIT())
-                else:
-                    self.me.setLocal(var_name, parseTokenAsType(tok_val), NO_INIT())
+                    raise SyntaxError("Expected ';' after variable initialization")
+                for var_name in var_names:
+
+                    if isClassAssign or isClassAssignWithGenerics:
+                        assignToClass = ClassReference(tok_val)
+                        LocalAssignment.assign(self.me, self.args, [tok_val, var_name], rhs_tokens, assignToClass)
+                    elif isTypeParamAssign:
+                        LocalAssignment.assign(self.me, self.args, ['Object', var_name], rhs_tokens)
+                    else:
+                        LocalAssignment.assign(self.me, self.args, [tok_val, var_name], rhs_tokens)
+            
+            elif self.tokPosition < len(self.lang) and self.lang[self.tokPosition].get()['type'] == 'SEMICOLON':
+                self.tokPosition += 1  # Skip semicolon
+                
+                for var_name in var_names:
+                    if isClassAssign:
+                        self.me.setLocal(var_name, ClassType(tok_val), NO_INIT())
+                    elif isTypeParamAssign:
+                        self.me.setLocal(var_name, ClassType('Object'), NO_INIT())
+                    else:
+                        self.me.setLocal(var_name, parseTokenAsType(tok_val), NO_INIT())
+            else:
+                raise SyntaxError("Expected ';' or '=' after variable declaration")
+            
             return False
         elif (tok_type in RETURN_TYPES or isClass(tok_val)) and self.peek().get()['type'] == 'LBRACKET':
             result = ArrayAssignment.parse(self.lang, self.tokPosition, tok_type, self.me, self.args)
             if result is None:
                 return False
             var_name, arrayType, array_value, self.tokPosition = result
-            self.me.setLocal(var_name, PrimitiveArrayWrapper(arrayType), array_value)
+            self.me.setLocal(var_name, arrayType, array_value)
             return False
         elif tok_type == 'IDENTIFIER' and self.peek().get()['type'] in ('INC', 'DEC'): # x++ or x--
             var_name = tok_val
@@ -2776,13 +3188,15 @@ class Method:
             self.tokPosition += 2
 
             if self.tokPosition < len(self.lang) and self.lang[self.tokPosition].get()['type'] == 'NEW':
-                self.tokPosition -= 2 
                 var_info = self.me.getLocal(var_name, Null(), True)
                 if var_info:
                     var_type = var_info['type']
-                    if isinstance(var_type, PrimitiveArrayWrapper):
+                    # Only handle the single-dimension shortcut here; multi-dimensional
+                    # array reassignment falls through to the general expression path below,
+                    # which understands nested 'new type[..][..]{...}' via collapseTokenSlice.
+                    if isinstance(var_type, PrimitiveArrayWrapper) and getArrayDepth(var_type) == 1:
                         element_type = var_type.getArrayType()
-                        pos = self.tokPosition + 2
+                        pos = self.tokPosition
                         # Skip 'new'
                         pos += 1
                         # Skip type
@@ -2842,11 +3256,10 @@ class Method:
                 pass
             
             # Static
-            if not updated:
-                if self.me.class_name in staticVariables and var_name in staticVariables[self.me.class_name]:
-                    isChangeable(staticVariables[self.me.class_name][var_name])
-                    staticVariables[self.me.class_name][var_name]['value'] = new_value
-                    updated = True
+            if not updated and self.me.class_name in staticVariables and var_name in staticVariables[self.me.class_name]:
+                isChangeable(staticVariables[self.me.class_name][var_name])
+                staticVariables[self.me.class_name][var_name]['value'] = new_value
+                updated = True
             if not updated and self.me.this is not None:
                 instance = self.me.this.get()
                 if var_name in instance.fields:
@@ -2873,21 +3286,27 @@ class Method:
             return False
         elif tok_type == 'IDENTIFIER' and self.next() == '[' and (self.before(getType='type') not in RETURN_TYPES and not isClass(self.before())): # Array assignment
             array_name = tok_val
-            close_bracket = matchingBracket(self.lang, self.tokPosition + 1)
             
-            index_tokens = self.lang[self.tokPosition + 2 : close_bracket]
-            index_value = Expression.evaluate(self.me, self.args, index_tokens)
+            # Walk through all consecutive '[<index>]' groups (e.g. arr[i][j][k]).
+            bracket_positions = []
+            scan_pos = self.tokPosition + 1
+            while scan_pos < len(self.lang) and self.lang[scan_pos].get()['type'] == 'LBRACKET':
+                close_b = matchingBracket(self.lang, scan_pos)
+                bracket_positions.append((scan_pos, close_b))
+                scan_pos = close_b + 1
             
-            if not isinstance(index_value, Int):
-                raise RuntimeError("Array index must be an integer")
-            index = index_value.get()
-            
-            self.tokPosition = close_bracket + 1
-            
-            if self.tokPosition >= len(self.lang) or self.lang[self.tokPosition].get()['type'] != 'ASSIGN':
-                self.tokPosition -= 1
+            if scan_pos >= len(self.lang) or self.lang[scan_pos].get()['type'] != 'ASSIGN':
+                self.tokPosition = bracket_positions[0][1]
             else:
-                self.tokPosition += 1
+                indices = []
+                for open_b, close_b in bracket_positions:
+                    index_tokens = self.lang[open_b + 1 : close_b]
+                    index_value = Expression.evaluate(self.me, self.args, index_tokens)
+                    if not isinstance(index_value, Int):
+                        raise RuntimeError("Array index must be an integer")
+                    indices.append(index_value.get())
+                
+                self.tokPosition = scan_pos + 1  # skip '='
                 
                 rhs_tokens = []
                 while self.tokPosition < len(self.lang) and self.lang[self.tokPosition].get()['type'] != 'SEMICOLON':
@@ -2898,27 +3317,36 @@ class Method:
                     raise SyntaxError("Expected ';' after array assignment")
                 self.tokPosition += 1
                 new_value = Expression.evaluate(self.me, self.args, rhs_tokens)
-                array_obj = resolveValue(self.me, self.args, token)
+                target = resolveValue(self.me, self.args, token)
                 
-                if not isinstance(array_obj, PrimitiveArray):
+                # Descend through all but the final index to reach the target sub-array.
+                for idx in indices[:-1]:
+                    if not isinstance(target, PrimitiveArray):
+                        raise RuntimeError(f"'{array_name}' is not an array")
+                    if idx < 0 or idx >= target.size:
+                        raise RuntimeError(f"Array index {idx} out of bounds for array of size {target.size}")
+                    target = target.get(idx)
+                
+                if not isinstance(target, PrimitiveArray):
                     raise RuntimeError(f"'{array_name}' is not an array")
                 
-                if index < 0 or index >= array_obj.size:
-                    raise RuntimeError(f"Array index {index} out of bounds for array of size {array_obj.size}")
+                final_index = indices[-1]
+                if final_index < 0 or final_index >= target.size:
+                    raise RuntimeError(f"Array index {final_index} out of bounds for array of size {target.size}")
                 
-                coerced_value = coerceValue(new_value, array_obj.listType)
-                isConsistentTypes(coerced_value, array_obj.listType)
-                array_obj.set(index, coerced_value)
+                coerced_value = coerceValue(new_value, target.listType)
+                isConsistentTypes(coerced_value, target.listType)
+                target.set(final_index, coerced_value)
                 
                 return False
-        elif tok_type == 'IDENTIFIER' and self.peek().get()['type'] == 'LPAREN' and not self.before() == '.': # Simple method call
+        elif tok_type == 'IDENTIFIER' and self.peek().get()['type'] == 'LPAREN' and self.before() not in ['.', 'new']: # Simple method call
             methodName = tok_val
             openParenIdx = self.tokPosition + 1
             closeIdx = matchingParen(self.lang, openParenIdx)
             argTokens = self.lang[openParenIdx + 1 : closeIdx]
             argGroups = Token.splitArgs(argTokens)
             evaledArgs = [Expression.evaluate(self.me, self.args, g) for g in argGroups]
-            
+
             if self.me.class_name in memory:
                 if methodName in memory[self.me.class_name]['methods']:
                     methodEntry = memory[self.me.class_name]['methods'][methodName]
@@ -3405,101 +3833,30 @@ class Method:
                 return True
             return False
         elif tok_type == 'FOR':
-            # for (<type?> <id> = <val>; <id_reference_condition>; <stmt?>)
-            # for (<type?> <id> : <collectionID>)
-            parseIdBy = 0
-            if self.next(by=2,getType='type') not in RETURN_TYPES:
-                parseIdBy -= 1
-            if isClass(self.next(by=2)):
-                parseIdBy += 1
-            if self.next(by=4+parseIdBy) == '=':
-                forLoopStmt = self.read(self.peek(), ')')
-                idTypeRead = self.peek(by=2+parseIdBy).get()
-                semiIdxs = [i for i, tok in enumerate(forLoopStmt) if tok.get()['type'] == 'SEMICOLON']
-                bounds = [-1] + semiIdxs + [len(forLoopStmt)]
-                forLoopParts = [forLoopStmt[bounds[k]+1:bounds[k+1]] for k in range(len(bounds)-1)]
-                
-                condition = forLoopParts[1]
-                try:
-                    varUpdateExpr = forLoopParts[2]
-                except IndexError: # There is no update statement
-                    varUpdateExpr = None
-                    pass 
+            self.tokPosition += 1
+            if self.tokPosition >= len(self.lang) or self.lang[self.tokPosition].get()['type'] != 'LPAREN':
+                raise SyntaxError("Expected '(' after 'for'")
+            self.tokPosition += 1
+            
+            header_start = self.tokPosition
+            close_paren = matchingParen(self.lang, header_start - 1)
+            header_tokens = self.lang[header_start:close_paren]
+            
+            # Scan the header to find if it's for-each (contains ':') or traditional (contains ';')
+            has_semicolon = False
+            has_colon = False
+            for tok in header_tokens:
+                if tok.get()['type'] == 'SEMICOLON':
+                    has_semicolon = True
+                    break
+                elif tok.get()['val'] == ':':
+                    has_colon = True
+                    break
 
-                if idTypeRead['type'] in RETURN_TYPES:
-                    idType = parseTokenAsType(idTypeRead['val'])
-                    idName = self.next(by=3+parseIdBy)
-                    idValue = Expression.evaluate(self.me, self.me.getArgs(), self.read(self.peek(by=5), ';'))
-                    self.me.setLocal(idName, idType, idValue)
-                    wasLocallyDefined = True
-                else:
-                    resolveValue(self.me, self.me.getArgs(), self.peek(by=3+parseIdBy)) # just check if it exists
-                    wasLocallyDefined = False
-                self.tokPosition += len(forLoopStmt) + 2
-                if self.tokPosition >= len(self.lang) or self.lang[self.tokPosition].get()['type'] != 'START_DECLARATION':
-                    raise SyntaxError("Expected '{' after for-loop header")
-                self.tokPosition += 1
-                body_start = self.tokPosition 
-
-                scan = body_start
-                depth = 1
-                closed = False
-                while scan < len(self.lang):
-                    t = self.lang[scan].get()['type']
-                    if t == 'START_DECLARATION':
-                        depth += 1
-                    elif t == 'END_DECLARATION':
-                        depth -= 1
-                        if depth == 0:
-                            scan += 1
-                            closed = True
-                            break
-                    scan += 1
-                if not closed:
-                    raise SyntaxError("Expected '}' to close 'for' block")
-                after_for_pos = scan
-
-                self.isInLoop = True
-                while True:
-                    condition_result = BooleanExpression.evaluate(self.me, self.args, condition)
-                    if not condition_result.get():
-                        break
-                    self.tokPosition = body_start
-                    state = self.executeBlock()
-                    if state == 'break':
-                        break
-                    elif state == 'continue':
-                        pass  # Must modify!
-                    elif state is True:
-                        self.isInLoop = False
-                        return True
-                    if varUpdateExpr is not None:
-                        if len(varUpdateExpr) >= 2:
-                            first_tok = varUpdateExpr[0]
-                            second_tok = varUpdateExpr[1] if len(varUpdateExpr) > 1 else None
-                            
-                            if first_tok.get()['type'] == 'IDENTIFIER' and second_tok:
-                                var_name = first_tok.get()['val']
-                                if second_tok.get()['type'] == 'INC':
-                                    current_val = self.me.getLocal(var_name, None, True)['value']
-                                    new_val = type(current_val)(current_val.get() + 1)
-                                    self.me.changeLocal(var_name, new_val)
-                                elif second_tok.get()['type'] == 'DEC':
-                                    current_val = self.me.getLocal(var_name, None, True)['value']
-                                    new_val = type(current_val)(current_val.get() - 1)
-                                    self.me.changeLocal(var_name, new_val)
-                                else: # Default to expr
-                                    newVal = Expression.evaluate(self.me, self.args, varUpdateExpr[2:])
-                                    self.me.changeLocal(idName, newVal)
-                if wasLocallyDefined:
-                    del self.me.locals[idName]
-                self.isInLoop = False
-                self.tokPosition = after_for_pos
-            elif self.next(by=4+parseIdBy) == ':':
-                forStmt = self.read(self.peek(), ')')
-                
+            if has_colon:
+                # for (<type> <var> : <collection>)
                 colon_idx = -1
-                for i, tok in enumerate(forStmt):
+                for i, tok in enumerate(header_tokens):
                     if tok.get()['val'] == ':':
                         colon_idx = i
                         break
@@ -3507,32 +3864,65 @@ class Method:
                 if colon_idx == -1:
                     raise SyntaxError("Expected ':' in for-each loop")
                 
-                left_parts = forStmt[:colon_idx]
-                if left_parts[0].get()['val'] == '(': # Include '(' for some reason, strip it
-                    left_parts = left_parts[1:]
-                if len(left_parts) != 2: 
-                    raise SyntaxError("Malformed loop statement")
-                type_token = left_parts[0].get()['val']
-                var_name = left_parts[1].get()['val']
-                if isClass(type_token):
-                    var_type = ClassType(type_token)
-                else:
-                    var_type = parseTokenAsType(type_token)
+                left_parts = header_tokens[:colon_idx]
+                right_parts = header_tokens[colon_idx + 1:]
                 
-                collection_expr = forStmt[colon_idx + 1:]
-                collection = Expression.evaluate(self.me, self.args, collection_expr)
+                # Parse left side: <type> <var>
+                # Strip any leading '(' that might be there
+                if left_parts and left_parts[0].get()['val'] == '(':
+                    left_parts = left_parts[1:]
+
+                if left_parts[-1].get()['type'] != 'IDENTIFIER' or left_parts[0].get()['val'] not in RETURN_TYPE_STR:
+                    raise SyntaxError("Malformed for-each loop: expected '<type> <var>'")
+                
+                type_tokens = left_parts[:-1]
+                var_name = left_parts[-1].get()['val']
+                if not type_tokens:
+                    raise SyntaxError("Expected type in for-each loop")
+                
+                type_str = ""
+                for tok in type_tokens:
+                    val = tok.get()['val']
+                    if val in ['[', ']']:
+                        type_str += val
+                    else:
+                        type_str += val
+                
+                if '[' in type_str and ']' in type_str:
+                    base_type_str = type_str.split('[')[0]
+                    dims = type_str.count('[')
+                    
+                    if base_type_str in RETURN_TYPE_STR or isClass(base_type_str):
+                        base_type = parseTokenAsType(base_type_str)
+                        var_type = makeArrayType(base_type, dims)
+                    else:
+                        raise SyntaxError(f"Unknown array element type: {base_type_str}")
+                elif isClass(type_str):
+                    var_type = ClassType(type_str)
+                else:
+                    try:
+                        var_type = parseTokenAsType(type_str)
+                    except ValueError:
+                        raise SyntaxError(f"Unknown type in for-each loop: {type_str}")
+                
+                collection = Expression.evaluate(self.me, self.args, right_parts)
                 
                 if not isinstance(collection, PrimitiveArray):
                     raise RuntimeError(f"Cannot iterate over non-array: {type(collection)}")
-                elements = collection.get()
-                self.tokPosition += len(forStmt) + 2
+                
+                # Get elements
+                elements = collection.values
+                
+                # Move past header
+                self.tokPosition = close_paren + 1
+                
+                # body
                 if self.tokPosition >= len(self.lang) or self.lang[self.tokPosition].get()['type'] != 'START_DECLARATION':
                     raise SyntaxError("Expected '{' after for-each header")
                 self.tokPosition += 1
                 body_start = self.tokPosition
-
-                # Pre-scan to find the position right after the matching '}' so we can
-                # reliably resume execution there regardless of how the loop terminates.
+                
+                # Pre-scan to find the matching '}'
                 scan = body_start
                 depth = 1
                 closed = False
@@ -3547,14 +3937,14 @@ class Method:
                             closed = True
                             break
                     scan += 1
+                
                 if not closed:
                     raise SyntaxError("Expected '}' to close 'for' block")
                 after_for_pos = scan
-
+                
                 self.isInLoop = True
-                if isinstance(elements, PrimitiveArray):
-                    elements = elements.values
-
+                
+                # Iterate
                 for element in elements:
                     self.me.setLocal(var_name, var_type, element)
                     self.tokPosition = body_start
@@ -3568,13 +3958,127 @@ class Method:
                         self.isInLoop = False
                         return True
                 
-                del self.me.locals[var_name]
+                if var_name in self.me.locals:
+                    del self.me.locals[var_name]
+                
                 self.isInLoop = False
                 self.tokPosition = after_for_pos
-                
                 return False
+            elif has_semicolon:
+                # for (<init>; <condition>; <update>)
+                # Split header by semicolons
+                semi_idxs = []
+                for i, tok in enumerate(header_tokens):
+                    if tok.get()['type'] == 'SEMICOLON':
+                        semi_idxs.append(i)
+                
+                if len(semi_idxs) < 2:
+                    raise SyntaxError("Malformed for loop: expected two semicolons")
+                
+                init_tokens = header_tokens[:semi_idxs[0]]
+                cond_tokens = header_tokens[semi_idxs[0] + 1:semi_idxs[1]]
+                update_tokens = header_tokens[semi_idxs[1] + 1:]
+                
+                # initialization
+                wasLocallyDefined = False
+                if init_tokens:
+                    if len(init_tokens) >= 2 and (init_tokens[0].get()['type'] in RETURN_TYPES or isClass(init_tokens[0].get()['val'])):
+                        var_type = parseTokenAsType(init_tokens[0].get()['val'])
+                        var_name = init_tokens[1].get()['val']
+                        
+                        if len(init_tokens) >= 4 and init_tokens[2].get()['type'] == 'ASSIGN':
+                            init_value_tokens = init_tokens[3:]
+                            init_value = Expression.evaluate(self.me, self.args, init_value_tokens)
+                            self.me.setLocal(var_name, var_type, init_value)
+                        else:
+                            self.me.setLocal(var_name, var_type, default_value_for_type(var_type))
+                        wasLocallyDefined = True
+                    else:
+                        # Just an expression statement
+                        Expression.evaluate(self.me, self.args, init_tokens)
+                
+                self.tokPosition = close_paren + 1
+                
+                if self.tokPosition >= len(self.lang) or self.lang[self.tokPosition].get()['type'] != 'START_DECLARATION':
+                    raise SyntaxError("Expected '{' after for-loop header")
+                self.tokPosition += 1
+                body_start = self.tokPosition
+                
+                scan = body_start
+                depth = 1
+                closed = False
+                while scan < len(self.lang):
+                    t = self.lang[scan].get()['type']
+                    if t == 'START_DECLARATION':
+                        depth += 1
+                    elif t == 'END_DECLARATION':
+                        depth -= 1
+                        if depth == 0:
+                            scan += 1
+                            closed = True
+                            break
+                    scan += 1
+                
+                if not closed:
+                    raise SyntaxError("Expected '}' to close 'for' block")
+                after_for_pos = scan
+                
+                self.isInLoop = True
+                
+                while True:
+                    # Check condition
+                    if cond_tokens:
+                        condition = BooleanExpression.evaluate(self.me, self.args, cond_tokens)
+                        if not condition.get():
+                            break
+                    else:
+                        # No condition means infinite loop
+                        pass
+                    
+                    # Execute body
+                    self.tokPosition = body_start
+                    state = self.executeBlock()
+                    
+                    if state == 'break':
+                        break
+                    elif state is True:
+                        self.isInLoop = False
+                        return True
+                    
+                    # Execute update
+                    if update_tokens:
+                        # Handle simple increment/decrement: var++ or var--
+                        if len(update_tokens) >= 2:
+                            first = update_tokens[0]
+                            second = update_tokens[1] if len(update_tokens) > 1 else None
+                            
+                            if first.get()['type'] == 'IDENTIFIER' and second:
+                                var_name = first.get()['val']
+                                if second.get()['type'] == 'INC':
+                                    current_val = self.me.getLocal(var_name, None, True)['value']
+                                    new_val = type(current_val)(current_val.get() + 1)
+                                    self.me.changeLocal(var_name, new_val)
+                                elif second.get()['type'] == 'DEC':
+                                    current_val = self.me.getLocal(var_name, None, True)['value']
+                                    new_val = type(current_val)(current_val.get() - 1)
+                                    self.me.changeLocal(var_name, new_val)
+                                else:
+                                    # General expression
+                                    Expression.evaluate(self.me, self.args, update_tokens)
+                            else:
+                                Expression.evaluate(self.me, self.args, update_tokens)
+                        else:
+                            Expression.evaluate(self.me, self.args, update_tokens)
+                
+                if wasLocallyDefined and var_name in self.me.locals:
+                    del self.me.locals[var_name]
+                
+                self.isInLoop = False
+                self.tokPosition = after_for_pos
+                return False
+            
             else:
-                raise RuntimeError(f'Could not evaluate iterable of {self.read(token, ")")[0].getPos()}')
+                raise SyntaxError("Malformed for loop: expected ';' or ':' in header")
         elif tok_type in LOOP_ACTIONS:  # 'break', 'continue'
             self.tokPosition += 1 
             if self.tokPosition < len(self.lang) and self.lang[self.tokPosition].get()['type'] == 'SEMICOLON':
@@ -3624,8 +4128,7 @@ class Method:
         hasReturned = False
         self.tokPosition = 0
         while self.tokPosition < len(self.lang):
-            a = self.executeLine()
-            if a:
+            if self.executeLine():
                 hasReturned = True
                 break
         if self.methodInfo.get('constructor', False):
@@ -3695,7 +4198,7 @@ class Execution:
                     is_constructor_call = True
             
             if self.currentClass and not self.info.get('isInMethod', False) and 'field_def' not in self.mode: # Applies context based on 'default'  # noqa: SIM102
-                if tok_type in RETURN_TYPES or (tok_type == 'IDENTIFIER' and tok_val in memory):
+                if tok_type in RETURN_TYPES or (tok_type == 'IDENTIFIER' and (tok_val in memory or tok_val in typeParamsOf(self.currentClass))):
                     next_token = self.peek(1) if self.tokPosition + 1 < len(self.lang) else None
                     next_next_token = self.peek(2) if self.tokPosition + 2 < len(self.lang) else None
                     
@@ -3791,9 +4294,7 @@ class Execution:
                 isThisAbstract = self.states.get('ABSTRACT', False)
                 if isThisAbstract:
                     readModifierBy = -1
-                if self.tokPosition == 1:
-                    modifier = 'default'
-                elif self.before(readModifierBy) not in ('public', 'private', 'protected', 'default'):
+                if self.tokPosition == 1 or self.before(readModifierBy) not in ('public', 'private', 'protected', 'default'):
                     modifier = 'default'
                 else:
                     modifier = self.before(readModifierBy) 
@@ -3802,6 +4303,12 @@ class Execution:
                 
                 class_name = self.next()
                 self.tokPosition += 1
+
+                classTypeParamNames: list[str] = []
+                if self.next() == '<':
+                    genEnd, classTypeParamNames = parseGenericTypeParams(self.lang, self.tokPosition + 1)
+                    
+                    self.tokPosition = genEnd
 
                 endClassDeclr = self.tokPosition + [a.get()['val'] for a in self.lang[self.tokPosition:]].index('{')
                 thisClassImplements = []
@@ -3818,13 +4325,13 @@ class Execution:
                         thisClassImplements.append(token.get()['val'])
 
                 if self.next() != 'extends':  # Check the next token after class name
-                    createClass(class_name, modifier, self.packageName, implements=thisClassImplements, isAbstract=isThisAbstract)
+                    createClass(class_name, modifier, self.packageName, implements=thisClassImplements, isAbstract=isThisAbstract, typeParams=classTypeParamNames)
                 else:
                     if self.info.get('hasSuper', False):
                         raise NameError(f'Class {class_name} cannot have multiple parent classes')
                     self.tokPosition += 1  # skip 'extends'
                     super_name = self.next()  # get superclass name
-                    createClass(class_name, modifier, self.packageName, ClassReference(super_name), thisClassImplements, isThisAbstract)
+                    createClass(class_name, modifier, self.packageName, ClassReference(super_name), thisClassImplements, isThisAbstract, typeParams=classTypeParamNames)
                 self.tokPosition = endClassDeclr-1
                 self.currentClass = class_name
                 self.clear()
@@ -3926,8 +4433,11 @@ class Execution:
                 #ClassName fieldName = ...; or ClassName fieldName;
                 if self.tokPosition >= 1:
                     prev_token = self.lang[self.tokPosition - 1]
-                    if prev_token.get()['type'] == 'IDENTIFIER' and prev_token.get()['val'] in memory:
-                        class_name = prev_token.get()['val']
+                    prev_val = prev_token.get()['val']
+                    classTypeParams = typeParamsOf(self.currentClass)
+                    if prev_token.get()['type'] == 'IDENTIFIER' and (prev_val in memory or prev_val in classTypeParams):
+                        class_name = prev_val
+                        fieldType = ClassType('Object') if class_name in classTypeParams else ClassType(class_name)
                         field_name = tok_val
                         
                         if self.next(by=1) == '=':
@@ -3950,7 +4460,7 @@ class Execution:
                                 ClassReference(self.currentClass),
                                 field_name,
                                 'public',  # modifier from context
-                                ClassType(class_name),
+                                fieldType,
                                 self.packageName,
                                 parsed_value,
                                 isStatic=self.states['STATIC'],
@@ -3964,7 +4474,7 @@ class Execution:
                                 ClassReference(self.currentClass),
                                 field_name,
                                 'public',
-                                ClassType(class_name),
+                                fieldType,
                                 self.packageName,
                                 isStatic=self.states['STATIC'],
                                 isFinal=self.states['FINAL']
@@ -3990,20 +4500,24 @@ class Execution:
                 var_name, arrayType, array_value, self.tokPosition = result
                 setField(
                     ClassReference(self.currentClass), var_name, modifier,
-                    PrimitiveArrayWrapper(arrayType), self.packageName, array_value,
+                    arrayType, self.packageName, array_value,
                     isStatic=self.states['STATIC'], isFinal=self.states['FINAL']
                 )
                 self.clear(noClearMode=True, noClearInfo=True)
                 continue
-            elif tok_type == EvalTokens.TOKENS['('] and not is_constructor_call and (self.before(2,'type') in (RETURN_TYPES + [EvalTokens.TOKENS['void']]) or isClass(self.before(2))): # METHOD
+            # METHOD
+            elif tok_type == EvalTokens.TOKENS['('] and not is_constructor_call and (self.before(2,'type') \
+            in (RETURN_TYPES + [EvalTokens.TOKENS['void']]) \
+            or isClass(self.before(2)) or self.before(2) in typeParamsOf(self.currentClass)): 
                 if 'method_def' in self.mode and self.currentClass and not self.currentInterface:
                     # <modifier>, <static?>, <return_type>, <method_name> ( <...>
                     #       4         3          2             1          ^ WE ARE HERE  
                     self.mode = ['is_active_method_def', 'arg_def']
+                    classTypeParams = typeParamsOf(self.currentClass)
                     args = argsList(self.handleArgumentDefinition())
                     checkedExecs = self.handleThrowStmt(token, len(list(args.keys())))
                     parseby = 1 if self.states['STATIC'] else 0
-                    methodReturnType = parseTokenAsType(self.before(by=2), True)
+                    methodReturnType = parseTokenAsType(self.before(by=2), True, typeParams=classTypeParams)
                     search_pos = self.tokPosition - 3
                     methodModifier = 'default'
                     while search_pos >= 0:
@@ -4017,7 +4531,9 @@ class Execution:
                     
                     isValidModifier(methodModifier)
                     if methodReturnType is ClassType:
-                        self.handleMethodDefinition(self.before(), methodModifier, ClassType(self.before(by=2)), self.states['STATIC'], args, checkedExecs)
+                        rawReturnTok = self.before(by=2)
+                        exactReturnType = ClassType('Object') if rawReturnTok in classTypeParams else ClassType(rawReturnTok)
+                        self.handleMethodDefinition(self.before(), methodModifier, exactReturnType, self.states['STATIC'], args, checkedExecs)
                     else:
                         self.handleMethodDefinition(self.before(), methodModifier, methodReturnType, self.states['STATIC'], args, checkedExecs)
                     self.info['thisMethodName'] = self.before()
@@ -4119,7 +4635,7 @@ class Execution:
                 
                 if '[' in arg and ']' in arg:
                     type_part = arg.split('[')[0].strip()
-                    name_part = arg.split(']')[1].strip() if ']' in arg else ''
+                    name_part = arg.rsplit(']', 1)[1].strip() if ']' in arg else ''
                     
                     if not name_part:
                         parts = arg.split()
@@ -4133,12 +4649,13 @@ class Execution:
                     
                     if name_part:
                         base_type = type_part.split('[')[0].strip()
+                        dims = max(arg.count('['), 1)
                         try:
                             if base_type in RETURN_TYPE_STR:
                                 arr_type = parseTokenAsType(base_type)
-                                arg_type = PrimitiveArrayWrapper(arr_type)
+                                arg_type = makeArrayType(arr_type, dims)
                             elif isClass(base_type):
-                                arg_type = PrimitiveArrayWrapper(ClassType(base_type))
+                                arg_type = makeArrayType(ClassType(base_type), dims)
                             else:
                                 raise RuntimeError(f'Could not resolve array type: {base_type}')
                         except Exception:
@@ -4152,16 +4669,18 @@ class Execution:
                     raise SyntaxError(f"Invalid argument definition: '{arg}'")
                 
                 arg_type_token, arg_name = parts
+                classTypeParams = typeParamsOf(self.currentClass)
                 
                 try:
-                    isValidReturnType(parseTokenAsType(arg_type_token))
-                    arg_type = parseTokenAsType(arg_type_token, wantExact=True)
+                    isValidReturnType(parseTokenAsType(arg_type_token, typeParams=classTypeParams))
+                    arg_type = parseTokenAsType(arg_type_token, wantExact=True, typeParams=classTypeParams)
                 except ValueError:
                     if '[' in arg_type_token and ']' in arg_type_token:
                         base_type = arg_type_token.split('[')[0]
+                        dims = max(arg_type_token.count('['), 1)
                         if base_type in RETURN_TYPE_STR or isClass(base_type):
                             arr_type = parseTokenAsType(base_type)
-                            arg_type = PrimitiveArrayWrapper(arr_type)
+                            arg_type = makeArrayType(arr_type, dims)
                         else:
                             raise RuntimeError(f'Could not resolve array type: {arg_type_token}')
                     elif isClass(arg_type_token):
@@ -4194,7 +4713,7 @@ class Execution:
             setField(ClassReference(self.currentClass), self.next(), modifier, _type, self.packageName, default_value_for_type(_type), isStatic=self.states['STATIC'], isFinal=self.states['FINAL'])
         else:
             setInterfaceField(self.currentInterface, self.next, _type, self.packageName, default_value_for_type(_type))
-    def handleMethodDefinition(self, methodName: str, methodModifier: str, methodReturnType: object, isStatic: bool, methodArgs: dict, throws: list = []):
+    def handleMethodDefinition(self, methodName: str, methodModifier: str, methodReturnType: object, isStatic: bool, methodArgs: dict, throws: list = [], usesGenericType: str = ''):
         createMethod(ClassReference(self.currentClass), methodName, methodModifier, methodReturnType, self.packageName, isStatic, argsList(methodArgs), throws)
         self.clear(noClearMode=True, noClearInfo=True)
     def clear(self, noClearMode: bool = False, noClearArgStack: bool = False, noClearInfo: bool = False):
@@ -4283,6 +4802,9 @@ def invokeMethod(className: str, methodName: str, args: list, caller: str, thisR
         
         mInfo = found_method
         mArgTypes = list(mInfo['args'].values())
+        if len(args) != len(mArgTypes):
+            differed = abs(len(args) - len(mArgTypes))
+            raise RuntimeError(f'Provided argument length differed by {differed} argument{'s' if differed > 1 else ''} to expected count')
         for mArgId in range(len(mArgTypes)):
             isConsistentTypes(args[mArgId], mArgTypes[mArgId])
             args[mArgId] = coerceValue(args[mArgId], mArgTypes[mArgId])
@@ -4317,7 +4839,6 @@ def invokeMethod(className: str, methodName: str, args: list, caller: str, thisR
         return currentFrame().returnValue
     finally:
         popFrame()
-
 choice = 'Retry'
 fileName = (input('Enter file name: ') + '.txt')
 if fileName == '.txt':
@@ -4335,7 +4856,7 @@ while choice == 'Retry':
         except FileNotFoundError:
             print(f'[WARNING]: The file {fileName} was not found in directory {Path(__file__).parent}')
             fileName = (input('Enter file name: ') + '.txt')
-    subprocess.run(['cls'], shell=True)
+    subprocess.run(['cls'], shell=True, check=False)
     if oldContent == content:
         print(f'[WARNING]: File reloading did not detect any changes in file. Did you save the file {fileName}?')
     try:
@@ -4355,7 +4876,7 @@ while choice == 'Retry':
 
             return ".".join(rel_path.parts)
         userArgs = input('[ENTER ARGS]: ')
-        subprocess.run(['cls'], shell=True)
+        subprocess.run(['cls'], shell=True, check=False)
         Exec = Execution(Intepreter(content), get_package_path())
         print('CONSOLE OUTPUT:\n')
         Exec.executeTokens()
@@ -4384,8 +4905,9 @@ while choice == 'Retry':
         for line in traceback.format_exception(e)[1:-1]:
             print(line.strip())
         print(f'\n[ERROR]: {traceback.format_exception(e)[-1]}')
+    #prettyPrint(memory['Box'])
     choice = 'Retry' if not input('\n[ENTER]: Reload file [OTHER+ENTER]: Exit console') else ''
     if choice == 'Retry':
         Exec.reset()
-    subprocess.run(['cls'], shell=True)
+    subprocess.run(['cls'], shell=True, check=False)
     oldContent = content
