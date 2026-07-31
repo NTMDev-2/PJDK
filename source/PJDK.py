@@ -2338,7 +2338,7 @@ class Return:
         me.returnValue = coerceValue(retValue, thisMethodInfo['returns'])
 class LocalAssignment:
     @staticmethod
-    def assign(me: StackFrame, methodArgs: list, assignArgs: list, valueByToken: TokenSlice, assignToClassType: ClassReference | None = None): #TODO: If assigning to a class, must provide another arugment for the type of variable assigning to.
+    def assign(me: StackFrame, methodArgs: list, assignArgs: list, valueByToken: TokenSlice, assignToClassType: ClassReference | None = None):
         valType = parseTokenAsType(assignArgs[0])
         val = Expression.evaluate(me, methodArgs, valueByToken)
 
