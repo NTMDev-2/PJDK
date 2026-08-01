@@ -1,9 +1,8 @@
+# (ignored for text editor efficiency):
 # mypy: ignore-errors
 # type: ignore
-# ISSUES:
-# 1. Can't do this: Box<Box> a = new Box<>(new Box<String>);
-# 2. Needs to type check T of Box<T> (example)
-# 3. 
+# ruff: disable[B006]
+# ruff: disable[B008]
 
 import builtins
 import operator as pyop
@@ -21,7 +20,7 @@ ENTRY_METHOD_NAME = 'main'
 ENTRY = {'entryClass': '', 'entryMethod': ENTRY_METHOD_NAME}
 
 nextHeapId = 0
-heap: dict = {}
+heap: dict['HeapInstance'] = {}
 
 memory: dict = {'Object': {'name': 'Object', 'methods': {}, 'fields': {}, 'package': 'MainRuntime', 'typeParams': [], 'abstract': False}}
 interfaces: dict = {}
@@ -145,7 +144,7 @@ class ExceptionValue(Returnable):
 class ClassReference(Returnable):
     def __init__(self, className):
         if className not in memory:
-            raise Exception(f'Class "{className}" does not exist')
+            raise NameError(f'Class "{className}" does not exist')
         self.className = className
     def get(self):
         return memory.get(self.className, Exception('This class does not exist'))
@@ -162,11 +161,7 @@ class ClassType(Returnable, Nullable):
 
 def isAllowedAtThisScope(modifier: str, thisScope: str, packageScope: str = 'this', isInterface: bool = False, item: str = '') -> bool:
     isValidModifier(modifier)
-    if isInterface:
-        return True
-    elif thisScope == 'this':
-        return True
-    elif modifier == 'public':
+    if isInterface or thisScope == 'this' or modifier == 'public':
         return True
     elif modifier == "default" and packageScope == 'this': # This will have "isSamePackage" check later
         return True
@@ -176,7 +171,19 @@ def isAllowedAtThisScope(modifier: str, thisScope: str, packageScope: str = 'thi
         raise PermissionError('Attempted to access a field, method, or constructor without sufficient permission')
     else:
         raise PermissionError(f'Attempted to access item "{item}" without sufficient permission')
-def isConsistentTypes(thisType: object, otherType: object) -> bool:
+def isConsistentTypes(thisType: object, otherType: object, genericMap = None) -> bool:
+    if genericMap:
+        def whatAmI(_type: str):
+            if isinstance(_type, ObjectReference):
+                _type = _type.getClass()
+            elif isinstance(_type, ClassType):
+                _type = _type.get()
+            if _type in memory or _type in interfaces:
+                return ClassType(_type)
+            else:
+                raise NameError(f'{_type} is not a class or interface, in this generic expression: {genericMap}')
+        thisType = whatAmI(resolveGenericReference(thisType, genericMap))
+        otherType = whatAmI(resolveGenericReference(otherType, genericMap))
     if isinstance(thisType, PrimitiveArray) and isinstance(otherType, PrimitiveArrayWrapper):
         isConsistentTypes(thisType.listType, otherType.getArrayType())
         arrayTypesEqual(thisType, otherType)
@@ -207,6 +214,15 @@ def isConsistentTypes(thisType: object, otherType: object) -> bool:
         if not (thisType.getClass() == otherType.className or otherType.className in getHierarchyOfClass(thisType.getClass())):
             raise TypeError(f'Class {otherType.className} does not support class {thisType.getClass()}')
         return True
+    
+    if isinstance(thisType, ClassType) and isinstance(otherType, ClassType):
+        this_class = thisType.get()
+        other_class = otherType.get()
+        if isCompatibleClassType(this_class, other_class) or isCompatibleClassType(other_class, this_class):
+            return True
+        
+        raise TypeError(f'Class {this_class} is not compatible with class {other_class}')
+
     if thisType is otherType:
         return True
     if not isinstance(thisType, type):
@@ -364,13 +380,13 @@ def isValidModifier(modifier: str):
     if not (modifier == 'private' or modifier == 'public' or modifier == 'protected' or modifier == 'default'):
         raise TypeError(f'The modifier provided was not either "private" or "public", was "{modifier}"')
 def isValidReturnType(selftype: object):
-    if isinstance(selftype, ClassType) or isinstance(selftype, ObjectReference):
+    if isinstance(selftype, (ClassType, ObjectReference)):
         return
     if not issubclass(selftype, Returnable):
-        raise Exception('This class is not returnable')
+        raise TypeError('This class is not returnable')
 def isChangeable(data: dict):
     if data['final']:
-        raise Exception(f'This variable "{data['name']}" is final, and therefore cannot be modified')
+        raise NameError(f'This variable "{data['name']}" is final, and therefore cannot be modified')
 def createClass(className: str, classModifier: str, package: str, superClass: ClassReference = ClassReference('Object'), implements: list[str] = [], isAbstract: bool = False, typeParams: list[str] | None = None):
     isValidModifier(classModifier)
     if className in memory:
@@ -429,8 +445,9 @@ def createClass(className: str, classModifier: str, package: str, superClass: Cl
         'abstract': isAbstract,
         'typeParams': list(typeParams) if typeParams else []
     }
-def createMethod(thisClass: ClassReference, methodName: str, methodModifier: str, methodReturnType: object, package: str, isStatic: bool = False, methodArgs: dict = {}, throws: list = [], isAbstract: bool = False, usesGenericType: str = ''):
-    isValidReturnType(methodReturnType)
+def createMethod(thisClass: ClassReference, methodName: str, methodModifier: str, methodReturnType: object, package: str, isStatic: bool = False, methodArgs: dict = {}, throws: list = [], isAbstract: bool = False):
+    if methodReturnType not in memory[thisClass.getClass()].get('typeParams', []):
+        isValidReturnType(methodReturnType)
     isValidModifier(methodModifier)
     classInfo = memory[thisClass.getClass()]
     methodInfo = classInfo['methods']
@@ -439,7 +456,6 @@ def createMethod(thisClass: ClassReference, methodName: str, methodModifier: str
         if not isinstance(existing, list):
             existing = [existing]
         
-        # Check if this signature already exists
         for m in existing:
             if len(m['args']) == len(methodArgs):
                 existing_keys = list(m['args'].keys())
@@ -461,8 +477,7 @@ def createMethod(thisClass: ClassReference, methodName: str, methodModifier: str
             'args': methodArgs,
             'throws': throws,
             'package': package,
-            'abstract': isAbstract,
-            'specialGeneric': usesGenericType
+            'abstract': isAbstract
         }
         existing.append(new_method)
         methodInfo[methodName] = existing
@@ -475,8 +490,7 @@ def createMethod(thisClass: ClassReference, methodName: str, methodModifier: str
             'args': methodArgs,
             'throws': throws,
             'package': package,
-            'abstract': isAbstract,
-            'specialGeneric': usesGenericType
+            'abstract': isAbstract
         }
     
     if isStatic:
@@ -487,8 +501,7 @@ def createMethod(thisClass: ClassReference, methodName: str, methodModifier: str
             'returns': methodReturnType,
             'args': methodArgs,
             'package': package,
-            'abstract': isAbstract,
-            'specialGeneric': usesGenericType
+            'abstract': isAbstract
         }
 def createConstructor(className: str, modifier: str, package: str, body: str, args: dict = {}):
     isValidModifier(modifier)
@@ -612,6 +625,7 @@ def setField(className: ClassReference, fieldName: str, fieldModifier: str, fiel
 class HeapInstance:
     def __init__(self, className: str):
         self.className = className
+        self.genericReferences = {}
         self.init: bool = False
         self.fields: dict = {}
         self.locals: dict = {}
@@ -623,7 +637,8 @@ class HeapInstance:
         return {
             'thisClass': self.className,
             'fields': self.fields,
-            'locals': self.locals
+            'locals': self.locals,
+            'genericReferences': self.genericReferences
         }
 class ObjectReference:
     def __init__(self, HeapId: int):
@@ -652,7 +667,7 @@ class StackFrame: # Method call information
             'type': localType,
             'value': value  
         }
-    def changeLocal(self, localName: str, newValue: object,):
+    def changeLocal(self, localName: str, newValue: object):
         if localName not in self.locals:
             raise RuntimeError(f'The local variable {localName} does not exist')
         localData = self.locals.get(localName, {})
@@ -681,14 +696,15 @@ def currentFrame() -> StackFrame:
         raise RuntimeError("No active stack frame")
     return callStack[-1]
 
-def newObject(class_name: str, constructorArgs: list = [], callerClass: str = '') -> ObjectReference:
+def newObject(class_name: str, constructorArgs: list = [], callerClass: str = '', genericTypeMap: dict = {}) -> ObjectReference:
     global nextHeapId
     
     if class_name not in memory:
         raise NameError(f"Class '{class_name}' is not defined")
     
     obj = HeapInstance(class_name)
-    
+    if genericTypeMap:
+        obj.genericReferences = genericTypeMap
     class_info = memory[class_name]
     if class_info['abstract']:
         raise NotImplementedError(f'The abstract class {class_name} cannot be instantiated')
@@ -727,7 +743,7 @@ def newObject(class_name: str, constructorArgs: list = [], callerClass: str = ''
         cons_method.execute()
         # Pop the constructor frame
         popFrame()
-    
+
     obj_id = nextHeapId
     nextHeapId += 1
     heap[obj_id] = obj
@@ -760,30 +776,30 @@ class PrimitiveArray(Returnable):
                     continue
                 isConsistentTypes(i, listType)
             except Exception:
-                raise Exception(f'List value {i} has inconsistent type {type(i).__name__}, when type {type(listType).__name__} was expected')
+                raise TypeError(f'List value {i} has inconsistent type {type(i).__name__}, when type {type(listType).__name__} was expected')
             self.values.append(coerceValue(i, listType))
         self.listType = listType
     def get(self, elementByIndex: int | None = None):
         if elementByIndex is None:
             return self
         if elementByIndex < 0:
-            raise Exception('Cannot have negative index')
+            raise IndexError('Cannot have negative index')
         if elementByIndex > len(self.values):
-            raise Exception('Array index out of bounds, index was too large')
+            raise IndexError('Array index out of bounds, index was too large')
         return self.values[elementByIndex]
     def set(self, index: int, value: object):
         if index is None:
             return self.returnThis()['value']
         if index < 0:
-            raise Exception('Cannot have negative index')
+            raise IndexError('Cannot have negative index')
         if index > len(self.values):
-            raise Exception('Array index out of bounds, index was too large')
+            raise IndexError('Array index out of bounds, index was too large')
         self.values[index] = coerceValue(value, self.listType)
     def remove(self, elementByIndex: int):
         if elementByIndex < 0:
-            raise Exception('Cannot have negative index')
+            raise IndexError('Cannot have negative index')
         if elementByIndex > len(self.values):
-            raise Exception('Array index out of bounds, index was too large')
+            raise IndexError('Array index out of bounds, index was too large')
         del self.values[elementByIndex]
     def returnThis(self):
         return {
@@ -1945,12 +1961,12 @@ def resolveDotChain(me: 'StackFrame | None', methodArgs: 'list | None', tokens: 
             raise RuntimeError(f"Cannot access '.{memberName}' on value: {current!r}")
 
     return current, j
-def collapseTokenSlice(me: StackFrame | None, methodArgs: list | None, tokens: TokenSlice) -> TokenSlice:
+def collapseTokenSlice(me: StackFrame | None, methodArgs: list | None, tokens: TokenSlice, generic_context: dict = {}) -> TokenSlice:
     out, i = [], 0
     while i < len(tokens):
         t = tokens[i].get()['type']
         if t == 'NEW':
-            if i + 2 < len(tokens) and tokens[i + 2].get()['type'] == 'LBRACKET':
+            if i + 2 < len(tokens) and tokens[i + 2].get()['type'] == 'LBRACKET': # Array
                 element_type_token = tokens[i + 1].get()['val']
                 element_type = parseTokenAsType(element_type_token)
 
@@ -1974,46 +1990,87 @@ def collapseTokenSlice(me: StackFrame | None, methodArgs: list | None, tokens: T
 
                 out.append(Token.wrap(array_obj))
                 continue
-            elif i + 2 < len(tokens) and tokens[i + 2].get()['val'] == '<':
+            elif i + 2 < len(tokens) and tokens[i + 2].get()['val'] == '<': # Generics
                 class_name = tokens[i + 1].get()['val']
                 pos = i + 2  # Position at '<'
                 
+                # Parse type arguments
                 depth = 0
+                type_args = []
+                current_arg = []
                 while pos < len(tokens):
                     val = tokens[pos].get()['val']
                     if val == '<':
                         depth += 1
                     elif val == '>':
                         depth -= 1
-
-                    if depth == 0:
-                        break
+                        if depth == 0:
+                            pos += 1
+                            # Flush
+                            if current_arg:
+                                arg_name = ''.join(current_arg).strip()
+                                if isClass(arg_name):
+                                    type_args.append(ClassType(arg_name))
+                                else:
+                                    type_args.append(arg_name)
+                                current_arg = []
+                            break
+                    elif val == ',' and depth == 1:
+                        # End of a type argument
+                        if current_arg:
+                            arg_name = ''.join(current_arg).strip()
+                            if isClass(arg_name):
+                                type_args.append(ClassType(arg_name))
+                            else:
+                                type_args.append(arg_name)
+                            current_arg = []
+                        pos += 1
+                        continue
+                    else:
+                        if depth == 1: 
+                            current_arg.append(val)
                     pos += 1
+                
                 if depth != 0:
                     raise SyntaxError("Unmatched '<' in generic type")
-                if pos < len(tokens) and tokens[pos+1].get()['type'] == 'LPAREN':
+                
+                class_info = memory.get(class_name, {})
+                type_params = class_info.get('typeParams', [])
+                type_map = {}
+                
+                for i, param in enumerate(type_params):
+                    if i < len(type_args):
+                        if isinstance(type_args[i], ClassType):
+                            type_map[param] = type_args[i].className
+                        else:
+                            type_map[param] = type_args[i]
+                    else:
+                        type_map[param] = 'Object'
+                
+                if generic_context:
+                    for key, value in generic_context.items():
+                        type_map[key] = value
+                
+                if pos < len(tokens) and tokens[pos].get()['type'] == 'LPAREN':
                     openParen = pos
                     closeParen = matchingParen(tokens, openParen)
                     
-                    arg_tokens = tokens[openParen + 1 : closeParen][1:]
+                    arg_tokens = tokens[openParen + 1 : closeParen]
                     if arg_tokens:
                         arg_groups = Token.splitArgs(arg_tokens)
-                        evaled_args = [Expression.evaluate(me, methodArgs, group) for group in arg_groups]
-                        obj = newObject(class_name, evaled_args, me.class_name if me else 'MainRuntime')
+                        evaled_args = [Expression.evaluate(me, methodArgs, group, generic_context=type_map) for group in arg_groups]
+                        obj = newObject(class_name, evaled_args, me.class_name if me else 'MainRuntime', type_map)
                     else:
-                        obj = newObject(class_name, callerClass=me.class_name if me else 'MainRuntime')
+                        obj = newObject(class_name, callerClass=me.class_name if me else 'MainRuntime', genericTypeMap=type_map)
                     
                     out.append(Token.wrap(obj))
                     i = closeParen + 1
                     continue
                 else:
                     raise SyntaxError(f"Expected '(' after generic type in new expression for class '{class_name}'")
-            
-            # Regular object creation: new ClassName()
-            else:
+            else: # Normal
                 className = tokens[i+1].get()['val']
                 
-                # Make sure we have a '(' after the class name
                 if i + 2 >= len(tokens) or tokens[i + 2].get()['type'] != 'LPAREN':
                     raise SyntaxError(f"Expected '(' after class name in new expression for class '{className}'")
                 
@@ -2023,10 +2080,10 @@ def collapseTokenSlice(me: StackFrame | None, methodArgs: list | None, tokens: T
                 arg_tokens = tokens[openParen + 1 : closeParen]
                 if arg_tokens:
                     arg_groups = Token.splitArgs(arg_tokens)
-                    evaled_args = [Expression.evaluate(me, methodArgs, group) for group in arg_groups]
-                    obj = newObject(className, evaled_args, me.class_name if me else 'MainRuntime')
+                    evaled_args = [Expression.evaluate(me, methodArgs, group, generic_context=generic_context) for group in arg_groups]
+                    obj = newObject(className, evaled_args, me.class_name if me else 'MainRuntime', generic_context)
                 else:
-                    obj = newObject(className, callerClass=me.class_name if me else 'MainRuntime')
+                    obj = newObject(className, callerClass=me.class_name if me else 'MainRuntime', genericTypeMap=generic_context)
                 
                 out.append(Token.wrap(obj))
                 i = closeParen + 1
@@ -2072,9 +2129,9 @@ def collapseTokenSlice(me: StackFrame | None, methodArgs: list | None, tokens: T
                 index_tokens = tokens[close_idx + 1 : bracket_close]
                 index_value = Expression.evaluate(me, methodArgs, index_tokens)
                 if not isinstance(element, PrimitiveArray):
-                    raise RuntimeError(f"'{array_name}' is not an array")
+                    raise TypeError(f"'{array_name}' is not an array")
                 if not isinstance(index_value, Int):
-                    raise RuntimeError("Array index must be an integer")
+                    raise IndexError("Array index must be an integer")
                 element = element.get(index_value.get())
                 close_idx = bracket_close + 1
             if close_idx + 1 < len(tokens) and tokens[close_idx].get()['type'] == 'DOT' \
@@ -2330,8 +2387,12 @@ def convertValue(value: object, target_type: object, allowLossy: bool = False) -
             raise TypeError(f"Cannot convert {type(value).__name__} to String")
     if type(value) is Null:           
         return type(target_type)(Null())
+    if type(value) is Void or target_type is Void:
+        raise ValueError('Unexpectedly reached an item that returned void in an expression')
+
     raise TypeError(f"Cannot convert {type(value).__name__} to {target_type.__name__}")
-def coerceValue(value: object, target_type: object) -> object:
+def coerceValue(value: object, target_type: object, genericMap=None) -> object:
+    target_type = resolveGenericReference(target_type, genericMap)
     if not isinstance(target_type, type) or not issubclass(target_type, Numeric):
         return value
     if not isinstance(value, Numeric) or isinstance(value, target_type):
@@ -2442,8 +2503,8 @@ def validateAbstractImplementation(className: str, abstractClassName: str):
 
 class Expression:
     @staticmethod
-    def evaluate(me: StackFrame | None, methodArgs: list | None, tokens: TokenSlice, forceType: str = 'int') -> Returnable:
-        tokens = collapseTokenSlice(me, methodArgs, tokens)
+    def evaluate(me: StackFrame | None, methodArgs: list | None, tokens: TokenSlice, forceType: str = 'int', generic_context: dict = {}) -> Returnable:
+        tokens = collapseTokenSlice(me, methodArgs, tokens, generic_context)
         stack: list = []
         assumeType = forceType
 
@@ -2492,6 +2553,8 @@ class Expression:
             if t in EvalTokens.PRECEDENCE:
                 b = stack.pop()
                 a = stack.pop()
+                if type(a) is Void or type(b) is Void:
+                    raise ValueError(f'Unexpectedly reached an item that returned void in an expression. Expression snippet: "{' '.join([str(a.get()['val']) for a in tokens])}"')
                 if isinstance(a, String) or isinstance(b, String): # Concatenation
                     stack.append(String(str(a.get()) + str(b.get())))
                     continue
@@ -2507,6 +2570,7 @@ class Expression:
                             result = int(a.get() / b.get())
                             result = Int(result)
                     else:
+                        
                         result = BIN_OPS[t](a.get(), b.get())
                     
                     if t in ARITHMETIC_OPS and t != 'DIVIDE':
@@ -2583,6 +2647,42 @@ def packagePrespectiveOfClass(_class: str, _relativeToClass: str) -> str:
         return 'other'
     return 'this'
 
+def doesImplementInterface(class_name: str, interface_name: str) -> bool:
+    """Check if a class implements an interface, including through inheritance."""
+    if not isClass(class_name):
+        return False
+    if not isInterface(interface_name):
+        return False
+    class_info = memory.get(class_name, {})
+    if interface_name in class_info.get('implements', []):
+        return True
+    for iface in class_info.get('implements', []):
+        if interface_name in getHierarchyOfInterface(iface):
+            return True
+    super_ref = class_info.get('super')
+    if super_ref is not None:
+        super_name = super_ref.getClass()
+        if super_name != 'Object':
+            return doesImplementInterface(super_name, interface_name)
+    
+    return False
+def isCompatibleClassType(type1: str, type2: str) -> bool:
+    if type1 == type2:
+        return True
+    
+    try:
+        hierarchy = getHierarchyOfClass(type1)
+        if type2 in hierarchy:
+            return True
+    except NameError:
+        pass
+    if isInterface(type2):
+        return doesImplementInterface(type1, type2)
+    if isInterface(type1):
+        return doesImplementInterface(type2, type1)
+    
+    return False
+
 def getSuperOfInterface(interfaceName: str) -> list[str]:
     if not isInterface(interfaceName):
         raise NameError(f'Interface {interfaceName} does not exist')
@@ -2623,14 +2723,17 @@ class Return:
         if thisMethodInfo['returns'] is Void:
             raise RuntimeError(f'Method "{me.method_name}" of class "{me.class_name}" has return statement, when return type is Void')
         retValue = Expression.evaluate(me, methodArgs, valueByToken)
-        isConsistentTypes(retValue, thisMethodInfo['returns'])
-        me.returnValue = coerceValue(retValue, thisMethodInfo['returns'])
+        genericMap = me.this.get().genericReferences
+        isConsistentTypes(retValue, thisMethodInfo['returns'], genericMap)
+        me.returnValue = coerceValue(retValue, thisMethodInfo['returns'], genericMap)
 class LocalAssignment:
     @staticmethod
-    def assign(me: StackFrame, methodArgs: list, assignArgs: list, valueByToken: TokenSlice, assignToClassType: ClassReference | None = None): 
+    def assign(me: StackFrame, methodArgs: list, assignArgs: list, valueByToken: TokenSlice, assignToClassType: ClassReference | None = None, genericTypeMap: dict | None = None): 
         valType = parseTokenAsType(assignArgs[0])
         val = Expression.evaluate(me, methodArgs, valueByToken)
-
+        if genericTypeMap and isinstance(val, ObjectReference):
+            obj = val.get()
+            obj.genericReferences = genericTypeMap
         if not isinstance(val, (ObjectReference, Null)):
             val = convertValue(val, valType)
         if valType is ClassType:
@@ -2645,7 +2748,7 @@ class LocalAssignment:
             actual = val.getClass()
             expected = assignToClassType.getClass()
             if actual != expected and actual not in getHierarchyOfClass(expected):
-                raise TypeError(f"Type mismatch: expected {expected}, got {actual}")
+                raise TypeError(f"Expected type was {expected}, but got {actual} type while assigning \"{assignArgs[1]}\" of class {me.class_name}")
             me.setLocal(assignArgs[1], ClassType(actual), val)
         else:
             isConsistentTypes(valType, val)
@@ -2654,65 +2757,10 @@ class FieldAssignment:
     @staticmethod
     def evaluate(valueByToken: TokenSlice) -> Returnable:
         return Expression.evaluate(None, None, valueByToken)
-def resolveGenericReferences(className: str, genericTypeArgs: list) -> dict:
-    if className not in memory:
-        return None
-    
-    class_info = memory[className]
-    type_params = class_info.get('typeParams', [])
-    
-    # Create mapping
-    type_map = {}
-    for i, param in enumerate(type_params):
-        if i < len(genericTypeArgs):
-            if isinstance(genericTypeArgs[i], ClassType):
-                type_map[param] = genericTypeArgs[i].className
-            elif isinstance(genericTypeArgs[i], str):
-                type_map[param] = genericTypeArgs[i]
-            else:
-                type_map[param] = 'Object'
-    
-    if not type_map and type_params:
-        for param in type_params:
-            type_map[param] = 'Object'
-    
-    # Copy
-    import copy
-    resolved_class = copy.deepcopy(class_info)
-    
-    # Resolve fields
-    for _, field_info in resolved_class['fields'].items():
-        field_type = field_info['type']
-        if isinstance(field_type, ClassType):
-            if field_type.className in type_map:
-                field_info['type'] = ClassType(type_map[field_type.className])
-        elif isinstance(field_type, PrimitiveArrayWrapper):
-            inner_type = field_type.getArrayType()
-            if isinstance(inner_type, ClassType) and inner_type.className in type_map:
-                field_info['type'] = PrimitiveArrayWrapper(ClassType(type_map[inner_type.className]))
-    
-    # Resolve methods
-    for _, method_entry in resolved_class['methods'].items():
-        methods = method_entry if isinstance(method_entry, list) else [method_entry]
-        for method_info in methods:
-            if isinstance(method_info['returns'], ClassType):
-                if method_info['returns'].className in type_map:
-                    method_info['returns'] = ClassType(type_map[method_info['returns'].className])
-            elif isinstance(method_info['returns'], PrimitiveArrayWrapper):
-                inner_type = method_info['returns'].getArrayType()
-                if isinstance(inner_type, ClassType) and inner_type.className in type_map:
-                    method_info['returns'] = PrimitiveArrayWrapper(ClassType(type_map[inner_type.className]))
-            
-            for arg_name, arg_type in method_info['args'].items():
-                if isinstance(arg_type, ClassType):
-                    if arg_type.className in type_map:
-                        method_info['args'][arg_name] = ClassType(type_map[arg_type.className])
-                elif isinstance(arg_type, PrimitiveArrayWrapper):
-                    inner_type = arg_type.getArrayType()
-                    if isinstance(inner_type, ClassType) and inner_type.className in type_map:
-                        method_info['args'][arg_name] = PrimitiveArrayWrapper(ClassType(type_map[inner_type.className]))
-
-    return resolved_class
+def resolveGenericReference(t, mapping):
+    while isinstance(t, str) and t in mapping:
+        t = mapping[t]
+    return t
 class Method:
     def __init__(self):
         self.me = currentFrame()
@@ -2862,12 +2910,20 @@ class Method:
             isClassAssignWithGenerics = False
 
         if ((tok_type in RETURN_TYPES or isClassAssign or isTypeParamAssign) and self.next(by=2) in ('=', ';', ',')) or isClassAssignWithGenerics: # Local assignment
-            
+            generic_type_map = {}
             if isClassAssignWithGenerics:
-                end_pos, base_class, _ = parseGenericTypeValue(self.lang, self.tokPosition)
+                end_pos, base_class, type_args = parseGenericTypeValue(self.lang, self.tokPosition)
                 pos = end_pos
                 while pos < len(self.lang) and self.lang[pos].get()['type'] in ('NEWLINE', 'WHITESPACE'):
                     pos += 1
+                class_info = memory.get(base_class, {})
+                type_params = class_info.get('typeParams', [])
+                for i, param in enumerate(type_params):
+                    if i < len(type_args):
+                        generic_type_map[param] = type_args[i]
+                    else:
+                        generic_type_map[param] = 'Object'
+
                 self.tokPosition = pos
                 isClassAssign = True
                 tok_val = base_class
@@ -2914,6 +2970,8 @@ class Method:
                     rhs_tokens.append(t)
                     self.tokPosition += 1
                 
+                val = Expression.evaluate(self.me, self.args, rhs_tokens, generic_context=generic_type_map)
+            
                 if self.tokPosition < len(self.lang) and self.lang[self.tokPosition].get()['type'] == 'SEMICOLON':
                     self.tokPosition += 1
                 else:
@@ -2922,7 +2980,7 @@ class Method:
 
                     if isClassAssign or isClassAssignWithGenerics:
                         assignToClass = ClassReference(tok_val)
-                        LocalAssignment.assign(self.me, self.args, [tok_val, var_name], rhs_tokens, assignToClass)
+                        LocalAssignment.assign(self.me, self.args, [tok_val, var_name], rhs_tokens, assignToClass, val.get().genericReferences)
                     elif isTypeParamAssign:
                         LocalAssignment.assign(self.me, self.args, ['Object', var_name], rhs_tokens)
                     else:
@@ -2980,7 +3038,7 @@ class Method:
                 if var_name in instance.fields:
                     field_def = memory[self.me.class_name]['fields'].get(var_name)
                     if field_def and field_def.get('final', False):
-                        raise Exception(f"Cannot assign to final field '{var_name}'")
+                        raise NameError(f"Cannot assign to final field '{var_name}'")
                     instance.fields[var_name] = new_value
                     updated = True
 
@@ -3132,7 +3190,7 @@ class Method:
                         raise RuntimeError(f"Field '{member_name}' not found on object")
                     field_def = memory[instance.className]['fields'].get(member_name)
                     if field_def and field_def.get('final', False):
-                        raise Exception(f"Cannot assign to final field '{member_name}'")
+                        raise NameError(f"Cannot assign to final field '{member_name}'")
                     isConsistentTypes(field_def['type'], type(new_value))
                     instance.fields[member_name] = coerceValue(new_value, field_def['type'])
                     return False
@@ -3154,7 +3212,7 @@ class Method:
                             raise RuntimeError(f"Field '{member_name}' not found on object")
                         field_def = memory[instance.className]['fields'].get(member_name)
                         if field_def and field_def.get('final', False):
-                            raise Exception(f"Cannot assign to final field '{member_name}'")
+                            raise NameError(f"Cannot assign to final field '{member_name}'")
                         current_value = instance.fields[member_name]
                         instance.fields[member_name] = type(current_value)(current_value.get() + delta)
                     elif obj_name in memory:
@@ -3189,9 +3247,6 @@ class Method:
                 var_info = self.me.getLocal(var_name, Null(), True)
                 if var_info:
                     var_type = var_info['type']
-                    # Only handle the single-dimension shortcut here; multi-dimensional
-                    # array reassignment falls through to the general expression path below,
-                    # which understands nested 'new type[..][..]{...}' via collapseTokenSlice.
                     if isinstance(var_type, PrimitiveArrayWrapper) and getArrayDepth(var_type) == 1:
                         element_type = var_type.getArrayType()
                         pos = self.tokPosition
@@ -3263,7 +3318,7 @@ class Method:
                 if var_name in instance.fields:
                     field_def = memory[self.me.class_name]['fields'].get(var_name)
                     if field_def and field_def.get('final', False):
-                        raise Exception(f"Cannot assign to final field '{var_name}'")
+                        raise NameError(f"Cannot assign to final field '{var_name}'")
                     isConsistentTypes(field_def['type'], type(new_value))
                     instance.fields[var_name] = coerceValue(new_value, field_def['type'])
                     updated = True
@@ -4424,6 +4479,7 @@ class Execution:
                     else:
                         t_type = parseTokenAsType(tok_type)
                     self.handleFieldDefinition(t_type, modifier, interface=isInterfaceField)
+                    print(t_type)
                 elif self.next(by=2) == ';':
                     self.mode = []
                     self.handleNullFieldDefinition(parseTokenAsType(tok_type), modifier, interface=isInterfaceField)
@@ -4530,18 +4586,18 @@ class Execution:
                     isValidModifier(methodModifier)
                     if methodReturnType is ClassType:
                         rawReturnTok = self.before(by=2)
-                        exactReturnType = ClassType('Object') if rawReturnTok in classTypeParams else ClassType(rawReturnTok)
+                        exactReturnType = rawReturnTok if rawReturnTok in classTypeParams else ClassType(rawReturnTok)
                         self.handleMethodDefinition(self.before(), methodModifier, exactReturnType, self.states['STATIC'], args, checkedExecs)
                     else:
                         self.handleMethodDefinition(self.before(), methodModifier, methodReturnType, self.states['STATIC'], args, checkedExecs)
                     self.info['thisMethodName'] = self.before()
                     if self.info.get('thisMethodName') == ENTRY_METHOD_NAME:
                         if methodModifier != 'public':
-                            raise Exception(f'The {ENTRY_METHOD_NAME} method must be public')
+                            raise LookupError(f'The {ENTRY_METHOD_NAME} method must be public')
                         if self.before(by=2) != 'void':
-                            raise Exception(f'The {ENTRY_METHOD_NAME} method must return void')
+                            raise LookupError(f'The {ENTRY_METHOD_NAME} method must return void')
                         if len(args) > 1:
-                            raise Exception(f'The {ENTRY_METHOD_NAME} method must not have more than 1 argument')
+                            raise LookupError(f'The {ENTRY_METHOD_NAME} method must not have more than 1 argument')
                     ENTRY['entryClass'] = self.currentClass
                 elif self.currentInterface or self.info.get('isAbstractClass', False):
                     # Interface method definition
@@ -4711,7 +4767,7 @@ class Execution:
             setField(ClassReference(self.currentClass), self.next(), modifier, _type, self.packageName, default_value_for_type(_type), isStatic=self.states['STATIC'], isFinal=self.states['FINAL'])
         else:
             setInterfaceField(self.currentInterface, self.next, _type, self.packageName, default_value_for_type(_type))
-    def handleMethodDefinition(self, methodName: str, methodModifier: str, methodReturnType: object, isStatic: bool, methodArgs: dict, throws: list = [], usesGenericType: str = ''):
+    def handleMethodDefinition(self, methodName: str, methodModifier: str, methodReturnType: object, isStatic: bool, methodArgs: dict, throws: list = []):
         createMethod(ClassReference(self.currentClass), methodName, methodModifier, methodReturnType, self.packageName, isStatic, argsList(methodArgs), throws)
         self.clear(noClearMode=True, noClearInfo=True)
     def clear(self, noClearMode: bool = False, noClearArgStack: bool = False, noClearInfo: bool = False):
@@ -4859,10 +4915,10 @@ while choice == 'Retry':
         print(f'[WARNING]: File reloading did not detect any changes in file. Did you save the file {fileName}?')
     try:
         def get_package_path():
-            if current_file_path is None:
+            if current_file_path is None: #noqa
                 return ""
 
-            file_dir = current_file_path.parent
+            file_dir = current_file_path.parent #noqa
             pjdk_dir = Path(__file__).parent
 
             try:
