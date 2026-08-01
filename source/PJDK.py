@@ -27,9 +27,7 @@ memory: dict = {'Object': {'name': 'Object', 'methods': {}, 'fields': {}, 'packa
 interfaces: dict = {}
 
 class Numeric:
-    @classmethod
-    def getReprToken(cls):
-        return type(cls).__name__.lower()
+    pass
 class Returnable: # Base class in class hierachy for anything that a method could return
     pass
 class Nullable:
